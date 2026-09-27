@@ -9,6 +9,7 @@ is installed there:
 | **Firewall and ports** - what to open, in which direction, to which address | [FIREWALL.md](FIREWALL.md) |
 | **Servers and VMs** (Windows, Linux, macOS) - install the Wazuh agent pointing at the collector | [agents/](agents/README.md) |
 | **Switches, routers, firewalls, hypervisors** - send syslog and SNMP traps to the collector | [devices/](devices/README.md) |
+| **Microsoft 365** - sign-ins, mailbox rules, file sharing: the collector fetches them from Microsoft | [microsoft365.md](microsoft365.md) |
 
 ```
                      CUSTOMER SITE                                   │        PROSETH SOC
@@ -62,3 +63,4 @@ internet access.
 | `agents/install-agent-linux.sh` | One-command Linux agent install (Debian/Ubuntu/RHEL family) |
 | `agents/install-agent-windows.ps1` | One-command Windows agent install |
 | `devices/*.md` | Syslog + SNMP configuration per vendor |
+| `microsoft365.md` | Microsoft 365 audit logs: the app to create, the one command, the firewall |
