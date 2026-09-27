@@ -32,8 +32,30 @@ stays on the collector only.
 
 ## 2. Run one command on the site collector
 
-Proseth gives you a one-line command with your IDs filled in. Run it on the
-collector as root. It:
+On the collector, as a user with sudo. Put your two IDs in place of the `<...>`:
+
+```bash
+curl -sO https://raw.githubusercontent.com/prosethsolutionsAI/pscyber-site-collector/main/o365.sh
+sudo PSCYBER_O365_TENANT='<Directory (tenant) ID>' PSCYBER_O365_CLIENT='<Application (client) ID>' bash o365.sh
+```
+
+Example:
+
+```bash
+sudo PSCYBER_O365_TENANT='1b2c3d4e-1111-2222-3333-444455556666' PSCYBER_O365_CLIENT='aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' bash o365.sh
+```
+
+(The Proseth SOC platform also shows this command with your IDs already filled in:
+Customers → your company → Onboarding → Microsoft 365 logs.)
+
+Options - add them after `sudo`, before `bash`:
+
+| Option | Default | Use |
+|---|---|---|
+| `PSCYBER_O365_SUBS='Audit.AzureActiveDirectory,Audit.Exchange'` | all five | Only some log types. Choose from `Audit.AzureActiveDirectory`, `Audit.Exchange`, `Audit.SharePoint`, `Audit.General`, `DLP.All` |
+| `PSCYBER_O365_API_TYPE='gcc'` | `commercial` | US Government clouds: `gcc` or `gcc-high` |
+
+What the command does:
 
 - asks for the client secret (typing is hidden);
 - checks the collector can reach Microsoft, signs in with the secret and checks
@@ -56,12 +78,24 @@ The collector needs **outbound TCP 443** to:
 | US Government GCC | `login.microsoftonline.com`, `manage-gcc.office.com` |
 | US Government GCC High | `login.microsoftonline.us`, `manage.office365.us` |
 
-Nothing inbound.
+Plus `raw.githubusercontent.com` (TCP 443) to download the script. Nothing inbound.
 
 ## Later
 
 - **Secret expires:** create a new one in the same app and run the same command
   again - it replaces the old one.
-- **Stop collecting:** run the command with `PSCYBER_O365_REMOVE=1` instead (Proseth
-  gives you that one too). It removes the settings and deletes the secret from the
+- **Stop collecting:** it removes the settings and deletes the secret from the
   collector. Then delete the secret, or the app, in Entra ID.
+
+  ```bash
+  curl -sO https://raw.githubusercontent.com/prosethsolutionsAI/pscyber-site-collector/main/o365.sh
+  sudo PSCYBER_O365_REMOVE=1 bash o365.sh
+  ```
+
+- **Check it is working** (on the collector):
+
+  ```bash
+  sudo grep -i office365 /var/ossec/logs/ossec.log | tail -n 5
+  ```
+
+  `Module Office365 started.` with no `ERROR` lines is good.
