@@ -107,6 +107,22 @@ files, no passwords), holds no token, and cannot run anything. The program itsel
 - Remove: Linux `systemctl disable --now pscyber-metrics.timer && rm -f /usr/local/bin/pscyber-metrics /etc/pscyber-metrics.conf /etc/systemd/system/pscyber-metrics.*`;
   Windows `Unregister-ScheduledTask -TaskName 'PSCyber Metrics' -Confirm:$false; Remove-Item -Recurse "$env:ProgramData\PSCyber"`.
 
+## Real-time registry monitoring (Windows, Sysmon)
+
+The Windows script also installs **Microsoft Sysmon** (from download.sysinternals.com, signature
+checked) with the PSCyber configuration `pscyber-sysmon.xml`. Every change to a registry key that
+attackers use - autostart (Run/RunOnce), services, Winlogon, Image File Execution Options, LSA,
+Defender and firewall settings, scheduled tasks, UAC - is reported **the moment it happens**, with
+the user and the program, tagged with its MITRE ATT&CK technique. Skip it with `-NoSysmon`.
+
+Machine that already has the agent (PowerShell as Administrator):
+
+```powershell
+iwr -UseBasicParsing https://raw.githubusercontent.com/prosethsolutionsAI/pscyber-site-onboarding/main/agents/install-sysmon-windows.ps1 -OutFile $env:TEMP\pscyber-sysmon.ps1; powershell -ExecutionPolicy Bypass -File $env:TEMP\pscyber-sysmon.ps1
+```
+
+Re-running it updates the configuration. Remove: `"C:\Program Files\PSCyber\Sysmon\Sysmon64.exe" -u`.
+
 ## A machine that ALREADY has a Wazuh agent
 
 If it used to report straight to a Wazuh manager, only its manager address has to

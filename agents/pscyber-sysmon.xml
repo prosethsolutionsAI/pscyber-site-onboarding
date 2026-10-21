@@ -1,0 +1,87 @@
+<!--
+  PSCyber Sysmon configuration - real-time registry, file and process telemetry for the SOC.
+  Focused on what attackers change, not everything: the registry keys used for persistence,
+  privilege escalation and turning security off; files dropped where Windows runs them
+  automatically; and every process start (Wazuh's rules pick out the suspicious ones).
+  Each registry entry below is a MITRE ATT&CK technique the SOC watches for.
+-->
+<Sysmon schemaversion="4.50">
+  <HashAlgorithms>sha256</HashAlgorithms>
+  <CheckRevocation>false</CheckRevocation>
+  <EventFiltering>
+
+    <!-- Event 1: process creation. The Wazuh agent's own processes are left out. -->
+    <RuleGroup name="" groupRelation="or">
+      <ProcessCreate onmatch="exclude">
+        <Image condition="begin with">C:\Program Files (x86)\ossec-agent\</Image>
+        <ParentImage condition="begin with">C:\Program Files (x86)\ossec-agent\</ParentImage>
+      </ProcessCreate>
+    </RuleGroup>
+
+    <!-- Events 12/13/14: registry key/value created, set, deleted or renamed - attacker keys only. -->
+    <RuleGroup name="" groupRelation="or">
+      <RegistryEvent onmatch="include">
+        <TargetObject name="T1547.001 Run keys" condition="contains">\CurrentVersion\Run</TargetObject>
+        <TargetObject name="T1547.001 Policies Run" condition="contains">\Policies\Explorer\Run</TargetObject>
+        <TargetObject name="T1547.004 Winlogon" condition="contains">\Microsoft\Windows NT\CurrentVersion\Winlogon</TargetObject>
+        <TargetObject name="T1546.012 IFEO" condition="contains">\Image File Execution Options\</TargetObject>
+        <TargetObject name="T1546.010 AppInit DLLs" condition="contains">\Windows\AppInit_DLLs</TargetObject>
+        <TargetObject name="T1546.015 COM hijack" condition="contains">\Software\Classes\CLSID\</TargetObject>
+        <TargetObject name="T1543.003 Services" condition="begin with">HKLM\System\CurrentControlSet\Services\</TargetObject>
+        <TargetObject name="T1547.005 LSA packages" condition="contains">\Control\Lsa\</TargetObject>
+        <TargetObject name="T1112 Credential caching" condition="contains">\Control\SecurityProviders\WDigest</TargetObject>
+        <TargetObject name="T1562.001 Defender off" condition="contains">\Policies\Microsoft\Windows Defender</TargetObject>
+        <TargetObject name="T1562.001 Defender settings" condition="contains">\Microsoft\Windows Defender\</TargetObject>
+        <TargetObject name="T1562.004 Firewall" condition="contains">\Services\SharedAccess\Parameters\FirewallPolicy</TargetObject>
+        <TargetObject name="T1053.005 Scheduled tasks" condition="contains">\Schedule\TaskCache\</TargetObject>
+        <TargetObject name="T1546.011 Shim databases" condition="contains">\AppCompatFlags\Custom</TargetObject>
+        <TargetObject name="T1548.002 UAC bypass" condition="contains">\shell\open\command</TargetObject>
+        <TargetObject name="T1548.002 UAC policy" condition="contains">\Policies\System\EnableLUA</TargetObject>
+        <TargetObject name="T1021.001 RDP" condition="contains">\Control\Terminal Server\</TargetObject>
+        <TargetObject name="T1137 Office startup" condition="contains">\Microsoft\Office\</TargetObject>
+        <TargetObject name="T1547.002 Authentication packages" condition="contains">\Control\Session Manager\</TargetObject>
+      </RegistryEvent>
+    </RuleGroup>
+    <!-- ...but not the services Windows itself rewrites all day (seen on a live DC: BITS, W32Time).
+         NOT svchost.exe as a whole (the Task Scheduler runs in it - that would hide task persistence)
+         and NOT every service's Start value (attackers set Defender's to 4 = disabled). -->
+    <RuleGroup name="" groupRelation="or">
+      <RegistryEvent onmatch="exclude">
+        <TargetObject condition="contains">\Services\bam\State\</TargetObject>
+        <TargetObject condition="contains">\Services\W32Time\</TargetObject>
+        <TargetObject condition="contains">\Services\BITS\</TargetObject>
+        <TargetObject condition="contains">\Services\wuauserv\</TargetObject>
+        <TargetObject condition="contains">\Services\UsoSvc\</TargetObject>
+        <TargetObject condition="contains">\Services\TrustedInstaller\</TargetObject>
+        <TargetObject condition="contains">\Services\Tcpip\Parameters\Interfaces\</TargetObject>
+        <TargetObject condition="contains">\Services\Dnscache\Parameters\</TargetObject>
+        <TargetObject condition="contains">\Services\Tcpip\Parameters</TargetObject>
+        <Image condition="begin with">C:\Program Files (x86)\ossec-agent\</Image>
+        <!-- Defender's own engine writes its own settings every few seconds (seen live). An attacker
+             turning Defender off writes from ANOTHER program, under \Policies\ - still recorded. -->
+        <Image condition="end with">\MsMpEng.exe</Image>
+        <Image condition="end with">\MpCmdRun.exe</Image>
+      </RegistryEvent>
+    </RuleGroup>
+
+    <!-- Event 11: files created where Windows runs them automatically. -->
+    <RuleGroup name="" groupRelation="or">
+      <FileCreate onmatch="include">
+        <TargetFilename name="T1547.001 Startup folder" condition="contains">\Start Menu\Programs\Startup\</TargetFilename>
+        <TargetFilename name="T1053.005 Task file" condition="begin with">C:\Windows\System32\Tasks\</TargetFilename>
+        <TargetFilename name="T1505.003 Web shell" condition="begin with">C:\inetpub\wwwroot\</TargetFilename>
+      </FileCreate>
+    </RuleGroup>
+
+    <!-- Everything else off: network, image loads and the rest would only add volume here. -->
+    <RuleGroup name="" groupRelation="or"><NetworkConnect onmatch="include"/></RuleGroup>
+    <RuleGroup name="" groupRelation="or"><ImageLoad onmatch="include"/></RuleGroup>
+    <RuleGroup name="" groupRelation="or"><ProcessAccess onmatch="include"/></RuleGroup>
+    <RuleGroup name="" groupRelation="or"><FileCreateTime onmatch="include"/></RuleGroup>
+    <RuleGroup name="" groupRelation="or"><CreateRemoteThread onmatch="include"/></RuleGroup>
+    <RuleGroup name="" groupRelation="or"><RawAccessRead onmatch="include"/></RuleGroup>
+    <RuleGroup name="" groupRelation="or"><PipeEvent onmatch="include"/></RuleGroup>
+    <RuleGroup name="" groupRelation="or"><DnsQuery onmatch="include"/></RuleGroup>
+    <RuleGroup name="" groupRelation="or"><FileDelete onmatch="include"/></RuleGroup>
+  </EventFiltering>
+</Sysmon>

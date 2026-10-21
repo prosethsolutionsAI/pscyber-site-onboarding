@@ -9,7 +9,8 @@
 
   Run as Administrator. Anything not given is asked for.
   It also installs the PSCyber device-health reporter (live CPU, memory, disk to the
-  collector on TCP 1520, numbers only) unless -NoHealth is given.
+  collector on TCP 1520, numbers only) unless -NoHealth is given, and Microsoft Sysmon with
+  the PSCyber configuration (real-time registry monitoring) unless -NoSysmon is given.
 #>
 param(
     [string]$Collector,
@@ -17,7 +18,8 @@ param(
     [string]$EnrollPassword,
     [string]$Name,
     [string]$Version = "4.14.7",
-    [switch]$NoHealth
+    [switch]$NoHealth,
+    [switch]$NoSysmon
 )
 $Raw = "https://raw.githubusercontent.com/prosethsolutionsAI/pscyber-site-onboarding/main/agents"
 $ErrorActionPreference = "Stop"
@@ -125,11 +127,22 @@ function Install-Health {
     Write-Host "  remove later: Unregister-ScheduledTask -TaskName 'PSCyber Metrics' -Confirm:`$false; Remove-Item -Recurse '$hd'"
 }
 
+# Real-time registry monitoring: Microsoft Sysmon with the PSCyber configuration (its own script, so a
+# machine that already has the agent can get it alone). A failure here never undoes the agent.
+function Install-Sysmon {
+    $src = Join-Path $PSScriptRoot "install-sysmon-windows.ps1"
+    try {
+        if (-not (Test-Path $src)) { $src = Join-Path $env:TEMP "pscyber-sysmon.ps1"; (New-Object Net.WebClient).DownloadFile("$Raw/install-sysmon-windows.ps1", $src) }
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $src
+    } catch { Write-Host "  (real-time registry monitoring skipped: $($_.Exception.Message) - run install-sysmon-windows.ps1 later)" }
+}
+
 Say "waiting for the agent to connect (up to 60 s)"
 for ($i = 0; $i -lt 30; $i++) {
     if ((New-LogText).Contains("Connected to the server ([$Collector]")) {
         Ok "connected to the SOC through the collector $Collector"
         if (-not $NoHealth) { Install-Health }
+        if (-not $NoSysmon) { Install-Sysmon }
         exit 0
     }
     Start-Sleep 2
