@@ -19,6 +19,21 @@ pscyber-collector site-agent-command
 > Do not install an agent version **newer** than 4.14.7 - the SOC managers refuse
 > agents newer than themselves.
 
+## One line per machine (agent + live device health)
+
+`pscyber-collector site-agent-command` on the collector prints these with its IP and group filled in.
+Each asks for the enrolment password.
+
+```bash
+# Linux, as root
+curl -fsSL https://raw.githubusercontent.com/prosethsolutionsAI/pscyber-site-onboarding/main/agents/install-agent-linux.sh | sudo bash -s -- --collector 192.168.10.50 --group Acme
+```
+
+```powershell
+# Windows, PowerShell as Administrator
+iwr -UseBasicParsing https://raw.githubusercontent.com/prosethsolutionsAI/pscyber-site-onboarding/main/agents/install-agent-windows.ps1 -OutFile $env:TEMP\pscyber-agent.ps1; powershell -ExecutionPolicy Bypass -File $env:TEMP\pscyber-agent.ps1 -Collector 192.168.10.50 -Group Acme
+```
+
 ## Windows (Server 2012 R2 and later, Windows 10/11)
 
 **Script** - PowerShell **as Administrator**:

@@ -4,7 +4,10 @@
 #
 #   sudo bash install-agent-linux.sh --collector 192.168.10.50 --group Acme [--password X] [--name Acme-web01] [--no-health]
 #
-# Anything not given is asked for. The enrolment password can also come from
+# One line, nothing to save first (asks for the enrolment password):
+#   curl -fsSL https://raw.githubusercontent.com/prosethsolutionsAI/pscyber-site-onboarding/main/agents/install-agent-linux.sh | sudo bash -s -- --collector 192.168.10.50 --group Acme
+#
+# Anything not given is asked for (from the terminal, so it works piped from curl too). The enrolment password can also come from
 # the environment (PSCYBER_ENROLL_PASSWORD) so it is not in the shell history.
 # It also installs the PSCyber device-health reporter (live CPU, memory, disk to the
 # collector on TCP 1520, numbers only) unless --no-health is given.
@@ -26,16 +29,25 @@ while [ $# -gt 0 ]; do
     --password)  PASSWORD="$2"; shift 2 ;;
     --name)      NAME="$2"; shift 2 ;;
     --no-health) HEALTH=0; shift ;;
-    -h|--help)   sed -n '2,11p' "$0"; exit 0 ;;
+    -h|--help)   sed -n '2,14p' "$0" 2>/dev/null || echo "see agents/README.md"; exit 0 ;;
     *) die "unknown option $1 (see --help)" ;;
   esac
 done
-[ "$(id -u)" -eq 0 ] || die "run as root (sudo bash $0 ...)"
+[ "$(id -u)" -eq 0 ] || die "run as root (sudo bash ...)"
+# Questions are read from the TERMINAL, not stdin: piped from curl, stdin is this script.
+ask() {
+  [ -r /dev/tty ] || die "$1 is required - pass it as an option (no terminal to ask on)"
+  read -r -p "  $1: " "$2" </dev/tty
+}
 
-[ -n "$COLLECTOR" ] || read -r -p "  Collector IP: " COLLECTOR
+[ -n "$COLLECTOR" ] || ask "Collector IP" COLLECTOR
 [ -n "$COLLECTOR" ] || die "the collector IP is required"
 
 CONF=/var/ossec/etc/ossec.conf
+LOG=/var/ossec/logs/ossec.log
+# Only log lines written AFTER this point count: an old "Connected" from before the restart
+# must not read as success (seen on a re-run).
+LOG_FROM=$(stat -c %s "$LOG" 2>/dev/null || echo 0)
 if [ -x /var/ossec/bin/wazuh-control ] && [ -f "$CONF" ]; then
   # Already an agent: only the manager address changes - its key stays valid,
   # because the collector relays to the same SOC.
@@ -44,10 +56,10 @@ if [ -x /var/ossec/bin/wazuh-control ] && [ -f "$CONF" ]; then
   sed -i "0,/<address>[^<]*<\/address>/s//<address>$COLLECTOR<\/address>/" "$CONF"
   systemctl restart wazuh-agent || die "wazuh-agent did not restart (journalctl -u wazuh-agent)"
 else
-  [ -n "$GROUP" ] || read -r -p "  Agent group (pscyber-collector site-agent-command shows it): " GROUP
+  [ -n "$GROUP" ] || ask "Agent group (pscyber-collector site-agent-command shows it)" GROUP
   [ -n "$GROUP" ] || die "the agent group is required - it is what puts this machine in your SOC tenant"
   if [ -z "$PASSWORD" ]; then
-    read -r -p "  Enrolment password (paste, then Enter): " PASSWORD
+    ask "Enrolment password (paste, then Enter)" PASSWORD
     printf '\033[1A\033[2K  Enrolment password: got %s characters\n' "${#PASSWORD}"
   fi
   [ -n "$NAME" ] || NAME="${GROUP}-$(hostname -s)"
@@ -129,7 +141,7 @@ EOF
 
 say "waiting for the agent to connect (up to 60 s)"
 for _ in $(seq 1 30); do
-  if grep -q "Connected to the server (\[$COLLECTOR\]" /var/ossec/logs/ossec.log 2>/dev/null; then
+  if tail -c +"$((LOG_FROM + 1))" "$LOG" 2>/dev/null | grep -q "Connected to the server (\[$COLLECTOR\]"; then
     ok "connected to the SOC through the collector $COLLECTOR"
     [ "$HEALTH" = 1 ] && install_health
     exit 0
@@ -137,6 +149,6 @@ for _ in $(seq 1 30); do
   sleep 2
 done
 echo "Not connected yet. Last messages:"
-grep -E "ERROR|WARNING|Connected" /var/ossec/logs/ossec.log | tail -5
+tail -c +"$((LOG_FROM + 1))" "$LOG" 2>/dev/null | grep -E "ERROR|WARNING|Connected" | tail -5
 echo "See 'Common problems' in agents/README.md."
 exit 1

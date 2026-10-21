@@ -4,6 +4,9 @@
 
     powershell -ExecutionPolicy Bypass -File .\install-agent-windows.ps1 -Collector 192.168.10.50 -Group Acme
 
+  One line, nothing to save first (PowerShell as Administrator; asks for the enrolment password):
+    iwr -UseBasicParsing https://raw.githubusercontent.com/prosethsolutionsAI/pscyber-site-onboarding/main/agents/install-agent-windows.ps1 -OutFile $env:TEMP\pscyber-agent.ps1; powershell -ExecutionPolicy Bypass -File $env:TEMP\pscyber-agent.ps1 -Collector 192.168.10.50 -Group Acme
+
   Run as Administrator. Anything not given is asked for.
   It also installs the PSCyber device-health reporter (live CPU, memory, disk to the
   collector on TCP 1520, numbers only) unless -NoHealth is given.
@@ -32,6 +35,19 @@ if (-not $Collector) { Die "the collector IP is required" }
 $dir = Join-Path ${env:ProgramFiles(x86)} "ossec-agent"
 $conf = Join-Path $dir "ossec.conf"
 $log = Join-Path $dir "ossec.log"
+
+# Only log lines written AFTER this point count: an old "Connected" from before the restart
+# must not read as success (seen on a re-run on Linux).
+$logFrom = if (Test-Path $log) { (Get-Item $log).Length } else { 0 }
+function New-LogText {
+    if (-not (Test-Path $log)) { return "" }
+    $fs = [IO.File]::Open($log, 'Open', 'Read', 'ReadWrite')
+    try {
+        if ($fs.Length -lt $logFrom) { $script:logFrom = 0 }  # rotated
+        [void]$fs.Seek($logFrom, 'Begin')
+        (New-Object IO.StreamReader($fs)).ReadToEnd()
+    } finally { $fs.Close() }
+}
 
 if (Test-Path $conf) {
     # Already an agent: only the manager address changes - its key stays valid,
@@ -111,7 +127,7 @@ function Install-Health {
 
 Say "waiting for the agent to connect (up to 60 s)"
 for ($i = 0; $i -lt 30; $i++) {
-    if ((Test-Path $log) -and (Select-String -Path $log -SimpleMatch "Connected to the server ([$Collector]" -Quiet)) {
+    if ((New-LogText).Contains("Connected to the server ([$Collector]")) {
         Ok "connected to the SOC through the collector $Collector"
         if (-not $NoHealth) { Install-Health }
         exit 0
@@ -119,6 +135,6 @@ for ($i = 0; $i -lt 30; $i++) {
     Start-Sleep 2
 }
 Write-Host "Not connected yet. Last messages:"
-if (Test-Path $log) { Select-String -Path $log -Pattern "ERROR|WARNING|Connected" | Select-Object -Last 5 | ForEach-Object { $_.Line } }
+(New-LogText) -split "`n" | Where-Object { $_ -match "ERROR|WARNING|Connected" } | Select-Object -Last 5
 Write-Host "See 'Common problems' in agents/README.md."
 exit 1
