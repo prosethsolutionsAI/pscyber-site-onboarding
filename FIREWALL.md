@@ -16,6 +16,7 @@ collector's own host firewall - the collector installer already does this when
 | Devices sending SNMP traps | Collector | **UDP 162** | SNMP traps |
 | Servers / VMs with the Wazuh agent | Collector | **TCP 1514** | agent events |
 | Servers / VMs with the Wazuh agent | Collector | **TCP 1515** | agent enrolment (first start only, but keep it open) |
+| Servers / VMs with the device-health reporter | Collector | **TCP 1520** | live CPU, memory, disk (numbers only, every 30 s; collector 1.2.5+) |
 | Your admin workstation | Collector | TCP 22 | SSH to manage the collector |
 
 ## 2. Customer internet firewall: collector → SOC (outbound only)

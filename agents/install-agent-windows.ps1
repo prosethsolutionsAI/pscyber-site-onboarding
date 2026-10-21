@@ -5,14 +5,18 @@
     powershell -ExecutionPolicy Bypass -File .\install-agent-windows.ps1 -Collector 192.168.10.50 -Group Acme
 
   Run as Administrator. Anything not given is asked for.
+  It also installs the PSCyber device-health reporter (live CPU, memory, disk to the
+  collector on TCP 1520, numbers only) unless -NoHealth is given.
 #>
 param(
     [string]$Collector,
     [string]$Group,
     [string]$EnrollPassword,
     [string]$Name,
-    [string]$Version = "4.14.7"
+    [string]$Version = "4.14.7",
+    [switch]$NoHealth
 )
+$Raw = "https://raw.githubusercontent.com/prosethsolutionsAI/pscyber-site-onboarding/main/agents"
 $ErrorActionPreference = "Stop"
 
 function Say($m) { Write-Host "==> $m" -ForegroundColor Cyan }
@@ -77,10 +81,39 @@ else {
     Start-Service WazuhSvc
 }
 
+# Device health: live CPU, memory, disks, network and top processes, every 30 s, to the
+# collector (TCP 1520), which relays it to the SOC - numbers only, no token on this machine.
+# The reporter program comes with this script (beside it, or from this repository over HTTPS),
+# never from the network the readings travel on.
+function Install-Health {
+    $t = New-Object Net.Sockets.TcpClient
+    $r = $t.BeginConnect($Collector, 1520, $null, $null)
+    $open = $r.AsyncWaitHandle.WaitOne(3000) -and $t.Connected
+    $t.Close()
+    if (-not $open) { Write-Host "  (device health skipped: the collector does not answer on TCP 1520 - update it to 1.2.5+ and open 1520, then re-run this script)"; return }
+    $hd = "$env:ProgramData\PSCyber"
+    New-Item -ItemType Directory -Force -Path $hd | Out-Null
+    icacls $hd /inheritance:r /grant:r 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' | Out-Null
+    $src = Join-Path $PSScriptRoot "pscyber-metrics.ps1"
+    try {
+        if (Test-Path $src) { Copy-Item $src "$hd\pscyber-metrics.ps1" -Force }
+        else { (New-Object Net.WebClient).DownloadFile("$Raw/pscyber-metrics.ps1", "$hd\pscyber-metrics.ps1") }
+    } catch { Write-Host "  (device health skipped: could not get pscyber-metrics.ps1)"; return }
+    @{ report_url = "http://$($Collector):1520/report"; token = ''; thumbprint = '' } | ConvertTo-Json | Set-Content -Encoding ASCII "$hd\metrics.json"
+    $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$hd\pscyber-metrics.ps1`""
+    $settings = New-ScheduledTaskSettingsSet -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+    Register-ScheduledTask -TaskName 'PSCyber Metrics' -Action $action -Trigger (New-ScheduledTaskTrigger -AtStartup) -Settings $settings -User 'SYSTEM' -RunLevel Highest -Force | Out-Null
+    Stop-ScheduledTask -TaskName 'PSCyber Metrics' -ErrorAction SilentlyContinue
+    Start-ScheduledTask -TaskName 'PSCyber Metrics'
+    Ok "device health reporting through the collector (live CPU, memory, disk)"
+    Write-Host "  remove later: Unregister-ScheduledTask -TaskName 'PSCyber Metrics' -Confirm:`$false; Remove-Item -Recurse '$hd'"
+}
+
 Say "waiting for the agent to connect (up to 60 s)"
 for ($i = 0; $i -lt 30; $i++) {
     if ((Test-Path $log) -and (Select-String -Path $log -SimpleMatch "Connected to the server ([$Collector]" -Quiet)) {
         Ok "connected to the SOC through the collector $Collector"
+        if (-not $NoHealth) { Install-Health }
         exit 0
     }
     Start-Sleep 2

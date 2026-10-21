@@ -76,6 +76,22 @@ sudo installer -pkg ./wazuh-agent.pkg -target /
 sudo /Library/Ossec/bin/wazuh-control start
 ```
 
+## Live device health (CPU, memory, disk)
+
+Both scripts also install the small **PSCyber device-health reporter** once the agent is
+connected. Every 30 seconds it sends the machine's CPU, memory, disk, network and top
+processes to the **collector on TCP 1520**, which relays them to the SOC - so each machine's
+page in the SOC (and your portal) shows them live. It sends **numbers only** (no logs, no
+files, no passwords), holds no token, and cannot run anything. The program itself is
+`pscyber-metrics.sh` / `pscyber-metrics.ps1` in this folder.
+
+- Needs collector **1.2.5 or later** and **TCP 1520** open to the collector ([FIREWALL.md](../FIREWALL.md)).
+  If 1520 does not answer, the script says so and skips it - the agent is unaffected.
+- Skip it: `--no-health` (Linux) / `-NoHealth` (Windows).
+- Machine that already has the agent: just re-run the script - it re-points the agent and adds the reporter.
+- Remove: Linux `systemctl disable --now pscyber-metrics.timer && rm -f /usr/local/bin/pscyber-metrics /etc/pscyber-metrics.conf /etc/systemd/system/pscyber-metrics.*`;
+  Windows `Unregister-ScheduledTask -TaskName 'PSCyber Metrics' -Confirm:$false; Remove-Item -Recurse "$env:ProgramData\PSCyber"`.
+
 ## A machine that ALREADY has a Wazuh agent
 
 If it used to report straight to a Wazuh manager, only its manager address has to
