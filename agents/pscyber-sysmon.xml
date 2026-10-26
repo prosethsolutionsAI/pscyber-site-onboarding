@@ -4,6 +4,9 @@
   privilege escalation and turning security off; files dropped where Windows runs them
   automatically; and every process start (Wazuh's rules pick out the suspicious ones).
   Each registry entry below is a MITRE ATT&CK technique the SOC watches for.
+  Since 2026-10-26 also the narrow telemetry Wazuh's OWN Sysmon rules need (they ship with the manager -
+  see integrations/wazuh/stock_sysmon_rules.txt): access to LSASS / explorer / the RDP client, remote
+  threads, PowerShell and admin-protocol connections, a few module loads, and WMI subscriptions.
 -->
 <Sysmon schemaversion="4.50">
   <HashAlgorithms>sha256</HashAlgorithms>
@@ -73,12 +76,82 @@
       </FileCreate>
     </RuleGroup>
 
-    <!-- Everything else off: network, image loads and the rest would only add volume here. -->
-    <RuleGroup name="" groupRelation="or"><NetworkConnect onmatch="include"/></RuleGroup>
-    <RuleGroup name="" groupRelation="or"><ImageLoad onmatch="include"/></RuleGroup>
-    <RuleGroup name="" groupRelation="or"><ProcessAccess onmatch="include"/></RuleGroup>
+    <!-- ===== Telemetry for Wazuh's OWN Sysmon rules (ruleset 0810/0820/0870/0945/0950 on the manager).
+         Each block records only what those rules look at, so volume stays small. 2026-10-26. ===== -->
+
+    <!-- Event 10: process access - ONLY to the processes Wazuh's rules watch (92900 LSASS read access,
+         92910 explorer, 92920 the RDP client). Query-only access rights are left out: they cannot read memory
+         and are what Windows itself does all day. -->
+    <RuleGroup name="" groupRelation="or">
+      <ProcessAccess onmatch="include">
+        <TargetImage condition="end with">\lsass.exe</TargetImage>
+        <TargetImage condition="end with">\explorer.exe</TargetImage>
+        <TargetImage condition="end with">\mstsc.exe</TargetImage>
+      </ProcessAccess>
+    </RuleGroup>
+    <RuleGroup name="" groupRelation="or">
+      <ProcessAccess onmatch="exclude">
+        <GrantedAccess condition="is any">0x1000;0x1400;0x100000;0x101000;0x2000;0x3000</GrantedAccess>
+        <SourceImage condition="begin with">C:\Program Files (x86)\ossec-agent\</SourceImage>
+        <SourceImage condition="end with">\MsMpEng.exe</SourceImage>
+        <!-- Windows licensing service copying a handle from Explorer every 15 min (0x40 = duplicate a handle,
+             cannot read memory) - seen on the lab DC; would otherwise match 92910 (L12) on every machine -->
+        <Rule groupRelation="and">
+          <SourceImage condition="end with">\System32\sppsvc.exe</SourceImage>
+          <TargetImage condition="end with">\explorer.exe</TargetImage>
+          <GrantedAccess condition="is">0x40</GrantedAccess>
+        </Rule>
+      </ProcessAccess>
+    </RuleGroup>
+
+    <!-- Event 8: one process starting a thread inside another (92400-92403). Rare in normal work. -->
+    <RuleGroup name="" groupRelation="or">
+      <CreateRemoteThread onmatch="exclude">
+        <SourceImage condition="begin with">C:\Program Files (x86)\ossec-agent\</SourceImage>
+      </CreateRemoteThread>
+    </RuleGroup>
+
+    <!-- Event 3: network connections - only those 0810's rules read: made BY PowerShell, and OUTGOING to
+         SMB / RPC / RDP / WinRM (92102-92110). Not every connection the machine makes. -->
+    <RuleGroup name="" groupRelation="or">
+      <NetworkConnect onmatch="include">
+        <Image condition="end with">\powershell.exe</Image>
+        <Image condition="end with">\pwsh.exe</Image>
+        <Rule groupRelation="and">
+          <Initiated condition="is">true</Initiated>
+          <DestinationPort condition="is any">135;445;3389;5985;5986</DestinationPort>
+        </Rule>
+      </NetworkConnect>
+    </RuleGroup>
+    <!-- ...but not our own device-health reporter (PowerShell -> the site collector on TCP 1520 every 30 s):
+         117 of 150 network events an hour on the lab DC -->
+    <RuleGroup name="" groupRelation="or">
+      <NetworkConnect onmatch="exclude">
+        <Rule groupRelation="and">
+          <Image condition="end with">\powershell.exe</Image>
+          <DestinationPort condition="is">1520</DestinationPort>
+        </Rule>
+      </NetworkConnect>
+    </RuleGroup>
+
+    <!-- Event 7: module loads - only the modules 0820's rules name (92151-92157). -->
+    <RuleGroup name="" groupRelation="or">
+      <ImageLoad onmatch="include">
+        <ImageLoaded condition="end with">\System.Management.Automation.dll</ImageLoaded>
+        <ImageLoaded condition="end with">\System.Management.Automation.ni.dll</ImageLoaded>
+        <ImageLoaded condition="end with">\vaultcli.dll</ImageLoaded>
+        <ImageLoaded condition="end with">\taskschd.dll</ImageLoaded>
+        <ImageLoaded condition="end with">\vbeui.dll</ImageLoaded>
+        <Image condition="end with">\spoolsv.exe</Image>
+        <ImageLoaded condition="contains">\AppData\Local\Temp\</ImageLoaded>
+      </ImageLoad>
+    </RuleGroup>
+
+    <!-- Events 19-21: WMI event subscriptions (89501/89502). A handful a year on a normal machine. -->
+    <RuleGroup name="" groupRelation="or"><WmiEvent onmatch="exclude"/></RuleGroup>
+
+    <!-- Still off: the rest would only add volume. -->
     <RuleGroup name="" groupRelation="or"><FileCreateTime onmatch="include"/></RuleGroup>
-    <RuleGroup name="" groupRelation="or"><CreateRemoteThread onmatch="include"/></RuleGroup>
     <RuleGroup name="" groupRelation="or"><RawAccessRead onmatch="include"/></RuleGroup>
     <RuleGroup name="" groupRelation="or"><PipeEvent onmatch="include"/></RuleGroup>
     <RuleGroup name="" groupRelation="or"><DnsQuery onmatch="include"/></RuleGroup>
