@@ -34,6 +34,43 @@ curl -fsSL https://raw.githubusercontent.com/prosethsolutionsAI/pscyber-site-onb
 iwr -UseBasicParsing https://raw.githubusercontent.com/prosethsolutionsAI/pscyber-site-onboarding/main/agents/install-agent-windows.ps1 -OutFile $env:TEMP\pscyber-agent.ps1; powershell -ExecutionPolicy Bypass -File $env:TEMP\pscyber-agent.ps1 -Collector 192.168.10.50 -Group Acme
 ```
 
+## Ready now, turn on later (and uninstall)
+
+For servers built before the customer's SOC is live - or before there is a site
+collector - install the agent **stopped and disabled**: pointed at nothing,
+enrolled nowhere, sending nothing. The script is kept on the machine, so turning
+it on later needs **no internet**.
+
+```bash
+# Linux
+curl -fsSL https://raw.githubusercontent.com/prosethsolutionsAI/pscyber-site-onboarding/main/agents/install-agent-linux.sh | sudo bash -s -- --prepare
+sudo pscyber-agent --collector 192.168.10.50 --group Acme     # later: enrols through the collector and starts
+sudo pscyber-agent --status                                     # OFF / READY / ON, and the manager address
+sudo pscyber-agent --uninstall                                  # agent + health reporter + the kept script
+```
+
+```powershell
+# Windows, PowerShell as Administrator
+iwr -UseBasicParsing https://raw.githubusercontent.com/prosethsolutionsAI/pscyber-site-onboarding/main/agents/install-agent-windows.ps1 -OutFile $env:TEMP\pscyber-agent.ps1; powershell -ExecutionPolicy Bypass -File $env:TEMP\pscyber-agent.ps1 -Prepare
+powershell -ExecutionPolicy Bypass -File "C:\Program Files\PSCyber\pscyber-agent.ps1" -Collector 192.168.10.50 -Group Acme
+powershell -ExecutionPolicy Bypass -File "C:\Program Files\PSCyber\pscyber-agent.ps1" -Status
+powershell -ExecutionPolicy Bypass -File "C:\Program Files\PSCyber\pscyber-agent.ps1" -Uninstall
+```
+
+The enrolment password is asked for (or `PSCYBER_ENROLL_PASSWORD`); it reaches
+`agent-auth` through a root-only file removed straight after, never the command
+line. Uninstall also removes the health reporter; Sysmon is left (`Sysmon64.exe -u`).
+Remove the agent in the SOC as well. Uninstall refuses to run on a site collector.
+
+**Proseth AIOps on the same server:** no conflict - AIOps adds only an rsyslog
+file sending TCP 514 to the AIOps collector; this agent uses TCP 1514/1515 to the
+PSCyber collector. Either can be prepared first. The two **collectors** must be
+separate machines (both receive syslog on 514 and traps on 162).
+
+**Cloned VMs:** a VM cloned from one that already had the agent carries the SAME
+key - both then fight over one agent in the SOC. On the clone run
+`sudo pscyber-agent --uninstall`, then install fresh.
+
 ## Windows (Server 2012 R2 and later, Windows 10/11)
 
 **Script** - PowerShell **as Administrator**:

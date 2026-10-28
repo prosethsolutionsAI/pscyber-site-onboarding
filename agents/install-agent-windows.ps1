@@ -11,6 +11,16 @@
   It also installs the PSCyber device-health reporter (live CPU, memory, disk to the
   collector on TCP 1520, numbers only) unless -NoHealth is given, and Microsoft Sysmon with
   the PSCyber configuration (real-time registry monitoring) unless -NoSysmon is given.
+
+  Ready now, turn on later (the customer has not bought the SOC yet, or there is no collector yet):
+    powershell -ExecutionPolicy Bypass -File .\install-agent-windows.ps1 -Prepare
+  installs the agent STOPPED and DISABLED - pointed at nothing, enrolled nowhere - and keeps
+  this script in C:\Program Files\PSCyber. Later, with no internet needed on the machine:
+    powershell -ExecutionPolicy Bypass -File "C:\Program Files\PSCyber\pscyber-agent.ps1" -Collector 192.168.10.50 -Group Acme
+    powershell -ExecutionPolicy Bypass -File "C:\Program Files\PSCyber\pscyber-agent.ps1" -Status
+    powershell -ExecutionPolicy Bypass -File "C:\Program Files\PSCyber\pscyber-agent.ps1" -Uninstall
+  (-Uninstall removes the agent, the health reporter and these copies; Sysmon is left - remove it
+   with "C:\Program Files\PSCyber\Sysmon\Sysmon64.exe" -u. Remove the machine in the SOC as well.)
 #>
 param(
     [string]$Collector,
@@ -19,7 +29,10 @@ param(
     [string]$Name,
     [string]$Version = "4.14.7",
     [switch]$NoHealth,
-    [switch]$NoSysmon
+    [switch]$NoSysmon,
+    [switch]$Prepare,
+    [switch]$Status,
+    [switch]$Uninstall
 )
 $Raw = "https://raw.githubusercontent.com/prosethsolutionsAI/pscyber-site-onboarding/main/agents"
 $ErrorActionPreference = "Stop"
@@ -31,12 +44,87 @@ function Die($m) { Write-Host "ERR $m" -ForegroundColor Red; exit 1 }
 $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $admin) { Die "run PowerShell as Administrator" }
 
-if (-not $Collector) { $Collector = Read-Host "  Collector IP" }
-if (-not $Collector) { Die "the collector IP is required" }
-
 $dir = Join-Path ${env:ProgramFiles(x86)} "ossec-agent"
 $conf = Join-Path $dir "ossec.conf"
 $log = Join-Path $dir "ossec.log"
+$kept = Join-Path $env:ProgramFiles "PSCyber"          # this script + its helpers, for turning on offline
+$mark = Join-Path $dir ".pscyber-prepared"
+
+if ($Uninstall) {
+    Unregister-ScheduledTask -TaskName 'PSCyber Metrics' -Confirm:$false -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force "$env:ProgramData\PSCyber" -ErrorAction SilentlyContinue
+    $pkg = Get-CimInstance Win32_Product -Filter "Name LIKE 'Wazuh Agent%'" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($pkg) {
+        Stop-Service WazuhSvc -ErrorAction SilentlyContinue
+        $p = Start-Process msiexec.exe -ArgumentList "/x $($pkg.IdentifyingNumber) /q" -Wait -PassThru
+        if ($p.ExitCode -ne 0) { Die "msiexec could not remove the agent (exit $($p.ExitCode))" }
+    }
+    Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
+    # Keep Sysmon's folder (it is still running from there); remove only our copies.
+    foreach ($f in 'pscyber-agent.ps1', 'pscyber-metrics.ps1', 'install-sysmon-windows.ps1', 'pscyber-sysmon.xml') {
+        Remove-Item -Force (Join-Path $kept $f) -ErrorAction SilentlyContinue
+    }
+    Ok "PSCyber agent removed from this machine (Sysmon left: `"$kept\Sysmon\Sysmon64.exe`" -u removes it)"
+    Write-Host "  If it was enrolled, also remove it in the SOC (its name stays registered until then)."
+    exit 0
+}
+
+if ($Status) {
+    if (-not (Test-Path $conf)) { Write-Host "OFF: no Wazuh agent on this machine" }
+    elseif (Test-Path $mark) { Write-Host "READY: agent installed, stopped, enrolled nowhere. Turn on: & `"$kept\pscyber-agent.ps1`" -Collector IP -Group GROUP" }
+    else {
+        $svc = Get-Service WazuhSvc -ErrorAction SilentlyContinue
+        $addr = ([regex]'<address>([^<]*)</address>').Match([IO.File]::ReadAllText($conf)).Groups[1].Value
+        Write-Host "ON: agent $($svc.Status), manager $addr"
+    }
+    exit 0
+}
+
+# Keep this script and its helpers, so turning the agent on - or re-pointing it - later needs no internet.
+function Save-Helper {
+    New-Item -ItemType Directory -Force -Path $kept | Out-Null
+    icacls $kept /inheritance:r /grant:r 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' 'Users:(OI)(CI)RX' | Out-Null
+    foreach ($f in @(@{ src = 'install-agent-windows.ps1'; dst = 'pscyber-agent.ps1' }, @{ src = 'pscyber-metrics.ps1'; dst = 'pscyber-metrics.ps1' },
+                     @{ src = 'install-sysmon-windows.ps1'; dst = 'install-sysmon-windows.ps1' }, @{ src = 'pscyber-sysmon.xml'; dst = 'pscyber-sysmon.xml' })) {
+        $here = if ($f.src -eq 'install-agent-windows.ps1') { $PSCommandPath } else { Join-Path $PSScriptRoot $f.src }
+        $to = Join-Path $kept $f.dst
+        if ($here -and ((Resolve-Path $here -ErrorAction SilentlyContinue).Path -eq (Resolve-Path $to -ErrorAction SilentlyContinue).Path)) { continue }
+        try {
+            if ($here -and (Test-Path $here)) { Copy-Item $here $to -Force }
+            else { (New-Object Net.WebClient).DownloadFile("$Raw/$($f.src)", $to) }
+        } catch { Write-Host "  (could not keep $($f.dst) - turning it on later may need the download line again)" }
+    }
+}
+
+if ($Prepare) {
+    if ((Test-Path $conf) -and -not (Test-Path $mark)) {
+        Save-Helper
+        Ok "a Wazuh agent is already installed and set up - nothing to prepare (re-point it: & `"$kept\pscyber-agent.ps1`" -Collector IP)"
+        exit 0
+    }
+    if (-not (Test-Path $conf)) {
+        Say "downloading wazuh-agent $Version"
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $msi = Join-Path $env:TEMP "wazuh-agent-$Version-1.msi"
+        try { (New-Object Net.WebClient).DownloadFile("https://packages.wazuh.com/4.x/windows/wazuh-agent-$Version-1.msi", $msi) }
+        catch { Die "download failed - this machine needs HTTPS to packages.wazuh.com just for the install" }
+        Say "installing (ready mode - not started, pointed at nothing)"
+        $p = Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /q" -Wait -PassThru
+        Remove-Item $msi -ErrorAction SilentlyContinue
+        if ($p.ExitCode -ne 0) { Die "msiexec failed with exit code $($p.ExitCode)" }
+    }
+    Stop-Service WazuhSvc -ErrorAction SilentlyContinue
+    Set-Service WazuhSvc -StartupType Disabled
+    New-Item -ItemType File -Force -Path $mark | Out-Null
+    Save-Helper
+    Ok "READY: the Wazuh agent is installed but STOPPED - pointed at nothing, sending nothing"
+    Write-Host "  Turn on later (no internet needed):"
+    Write-Host "    powershell -ExecutionPolicy Bypass -File `"$kept\pscyber-agent.ps1`" -Collector <COLLECTOR_IP> -Group <GROUP>"
+    exit 0
+}
+
+if (-not $Collector) { $Collector = Read-Host "  Collector IP" }
+if (-not $Collector) { Die "the collector IP is required" }
 
 # Only log lines written AFTER this point count: an old "Connected" from before the restart
 # must not read as success (seen on a re-run on Linux).
@@ -51,7 +139,47 @@ function New-LogText {
     } finally { $fs.Close() }
 }
 
-if (Test-Path $conf) {
+function Test-Ports {
+    foreach ($p in 1514, 1515) {
+        $t = New-Object Net.Sockets.TcpClient
+        $r = $t.BeginConnect($Collector, $p, $null, $null)
+        $okc = $r.AsyncWaitHandle.WaitOne(3000) -and $t.Connected
+        $t.Close()
+        if (-not $okc) { Die "cannot reach $Collector TCP $p - open it between this machine and the collector (FIREWALL.md)" }
+    }
+    Ok "TCP 1514 and 1515 reachable"
+}
+
+if ((Test-Path $mark) -and (Test-Path (Join-Path $dir "agent-auth.exe"))) {
+    # Prepared earlier (-Prepare): installed, never enrolled. Enrol it now through the collector,
+    # then start it. The password goes to agent-auth in a file removed straight after - never argv.
+    if (-not $Group) { $Group = Read-Host "  Agent group (pscyber-collector site-agent-command shows it)" }
+    if (-not $Group) { Die "the agent group is required - it is what puts this machine in your SOC tenant" }
+    if (-not $EnrollPassword) {
+        $EnrollPassword = Read-Host "  Enrolment password (paste, then Enter)"
+        Write-Host "  Enrolment password: got $($EnrollPassword.Length) characters"
+    }
+    if (-not $Name) { $Name = "$Group-$env:COMPUTERNAME" }
+    Say "checking the collector $Collector is reachable"
+    Test-Ports
+    Copy-Item $conf "$conf.bak-$(Get-Date -Format yyyyMMddHHmmss)"
+    $text = [IO.File]::ReadAllText($conf)
+    $text = (New-Object Text.RegularExpressions.Regex "<address>[^<]*</address>").Replace($text, "<address>$Collector</address>", 1)
+    [IO.File]::WriteAllText($conf, $text)
+    $passf = Join-Path $dir "authd.pass"
+    [IO.File]::WriteAllText($passf, $EnrollPassword)
+    Say "enrolling as $Name in group $Group"
+    $ErrorActionPreference = "Continue"   # agent-auth writes progress to stderr; under Stop that would throw
+    $out = & (Join-Path $dir "agent-auth.exe") -m $Collector -G $Group -A $Name 2>&1
+    $rc = $LASTEXITCODE
+    $ErrorActionPreference = "Stop"
+    Remove-Item $passf -Force -ErrorAction SilentlyContinue
+    if ($rc -ne 0) { $out | Select-Object -Last 3 | Write-Host; Die "enrolment refused (see 'Common problems' in agents/README.md)" }
+    Remove-Item $mark -Force
+    Set-Service WazuhSvc -StartupType Automatic
+    Start-Service WazuhSvc
+}
+elseif (Test-Path $conf) {
     # Already an agent: only the manager address changes - its key stays valid,
     # because the collector relays to the same SOC.
     Say "a Wazuh agent is already installed - pointing it at the collector $Collector"
@@ -72,14 +200,7 @@ else {
     if (-not $Name) { $Name = "$Group-$env:COMPUTERNAME" }
 
     Say "checking the collector $Collector is reachable"
-    foreach ($p in 1514, 1515) {
-        $t = New-Object Net.Sockets.TcpClient
-        $r = $t.BeginConnect($Collector, $p, $null, $null)
-        $okc = $r.AsyncWaitHandle.WaitOne(3000) -and $t.Connected
-        $t.Close()
-        if (-not $okc) { Die "cannot reach $Collector TCP $p - open it between this machine and the collector (FIREWALL.md)" }
-    }
-    Ok "TCP 1514 and 1515 reachable"
+    Test-Ports
 
     Say "downloading wazuh-agent $Version"
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -143,6 +264,7 @@ for ($i = 0; $i -lt 30; $i++) {
         Ok "connected to the SOC through the collector $Collector"
         if (-not $NoHealth) { Install-Health }
         if (-not $NoSysmon) { Install-Sysmon }
+        Save-Helper
         exit 0
     }
     Start-Sleep 2
