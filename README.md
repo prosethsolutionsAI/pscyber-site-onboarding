@@ -26,6 +26,32 @@ to the SOC, only outbound, through one mutual-TLS tunnel. Nothing inbound has to
 opened on the customer's internet firewall, and no device at the site needs
 internet access.
 
+## One installer for every Proseth product
+
+Run once on each server. It asks which product the customer uses **now** (PSCyber
+Agentic SOC, Proseth AIOps, both, or none yet), switches that on, and installs the
+others **ready** - sending nothing, enrolled nowhere. Buy another later: one line,
+no internet needed.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/prosethsolutionsAI/pscyber-site-onboarding/main/proseth-prepare.sh | sudo bash
+# no questions:  ... | sudo bash -s -- --now agentic --agentic-collector 192.168.10.50 --group Acme
+
+sudo proseth-ready status
+sudo proseth-ready agentic --collector 192.168.10.50 --group Acme
+sudo proseth-ready aiops   --collector 192.168.10.60
+sudo proseth-ready uninstall
+```
+
+Windows (PowerShell as Administrator):
+
+```powershell
+iwr -UseBasicParsing https://raw.githubusercontent.com/prosethsolutionsAI/pscyber-site-onboarding/main/proseth-prepare.ps1 -OutFile $env:TEMP\proseth-prepare.ps1; powershell -ExecutionPolicy Bypass -File $env:TEMP\proseth-prepare.ps1
+```
+
+The PSCyber collector and the Proseth AIOps collector are **separate machines**
+(both receive syslog on 514).
+
 ## Before you start - collect these four values
 
 | Value | Where it comes from | Example |
