@@ -175,6 +175,18 @@ attackers use - autostart (Run/RunOnce), services, Winlogon, Image File Executio
 Defender and firewall settings, scheduled tasks, UAC - is reported **the moment it happens**, with
 the user and the program, tagged with its MITRE ATT&CK technique. Skip it with `-NoSysmon`.
 
+Since 1.8.0 the same configuration also reports, kept narrow so a normal machine adds almost nothing
+(measured on a lab domain controller: no extra events in normal work):
+
+| What | Why the SOC wants it |
+|---|---|
+| Kernel drivers that are not Microsoft's own | Ransomware loads an old vulnerable driver to switch off antivirus/EDR |
+| Named pipes with the default names of attack tools (Cobalt Strike and similar, PsExec and its clones) | An attacker's implant, or remote commands run on this machine |
+| DNS lookups of tunnel, exploit-callback, file-drop/paste and dynamic-DNS services, and by Windows tools such as mshta or certutil | Control of the machine from outside, or data being carried out |
+
+Ordinary web browsing is not recorded. Machines installed before 1.8.0 keep their old configuration
+until the command below is run on them.
+
 Machine that already has the agent (PowerShell as Administrator):
 
 ```powershell

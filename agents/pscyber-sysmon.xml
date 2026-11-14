@@ -7,6 +7,9 @@
   Since 2026-10-26 also the narrow telemetry Wazuh's OWN Sysmon rules need (they ship with the manager -
   see integrations/wazuh/stock_sysmon_rules.txt): access to LSASS / explorer / the RDP client, remote
   threads, PowerShell and admin-protocol connections, a few module loads, and WMI subscriptions.
+  Since 2026-11-14 (detection batch 3, site onboarding 1.8.0) also: driver loads that are not Microsoft's, named pipes
+  with the default names of attack tools, and DNS lookups of tunnel / callback / file-drop / dynamic-DNS services and
+  by Windows' own download-cradle tools - each narrowed to what PSCyber rules 101300-101325 read.
 -->
 <Sysmon schemaversion="4.50">
   <HashAlgorithms>sha256</HashAlgorithms>
@@ -150,11 +153,130 @@
     <!-- Events 19-21: WMI event subscriptions (89501/89502). A handful a year on a normal machine. -->
     <RuleGroup name="" groupRelation="or"><WmiEvent onmatch="exclude"/></RuleGroup>
 
+    <!-- ===== Detection batch 3 (2026-11-14): driver loads, named pipes, DNS - read by PSCyber rules 101300-101339.
+         Each is narrowed to what the rules look at, so a normal machine adds only a few events an hour. ===== -->
+
+    <!-- Event 6: kernel drivers. Everything EXCEPT drivers validly signed by Microsoft - a handful at boot. Attackers
+         load an old, vulnerable but validly signed vendor driver to switch off antivirus/EDR ("bring your own
+         vulnerable driver"), so third-party signed drivers stay in. -->
+    <RuleGroup name="" groupRelation="or">
+      <DriverLoad onmatch="exclude">
+        <Rule groupRelation="and">
+          <Signature condition="begin with">Microsoft</Signature>
+          <SignatureStatus condition="is">Valid</SignatureStatus>
+        </Rule>
+      </DriverLoad>
+    </RuleGroup>
+
+    <!-- Events 17/18: named pipes - ONLY names attack tools use by default (Cobalt Strike and other C2 frameworks,
+         old credential dumpers) and remote-execution services (PsExec and its clones). Windows' own pipes are not
+         recorded at all. -->
+    <RuleGroup name="" groupRelation="or">
+      <PipeEvent onmatch="include">
+        <PipeName name="C2 Cobalt Strike" condition="begin with">\msagent_</PipeName>
+        <PipeName name="C2 Cobalt Strike" condition="begin with">\MSSE-</PipeName>
+        <PipeName name="C2 Cobalt Strike" condition="begin with">\postex_</PipeName>
+        <PipeName name="C2 Cobalt Strike" condition="begin with">\status_</PipeName>
+        <PipeName name="C2 Cobalt Strike" condition="begin with">\mojo.5688.8052.</PipeName>
+        <PipeName name="C2 Cobalt Strike" condition="begin with">\DserNamePipe</PipeName>
+        <PipeName name="C2 Cobalt Strike" condition="begin with">\SearchTextHarvester</PipeName>
+        <PipeName name="C2 Cobalt Strike" condition="begin with">\windows.update.manager</PipeName>
+        <PipeName name="C2 Cobalt Strike" condition="begin with">\PGMessagePipe</PipeName>
+        <PipeName name="C2 Cobalt Strike" condition="begin with">\fullduplex_</PipeName>
+        <PipeName name="C2 Cobalt Strike" condition="begin with">\mypipe-</PipeName>
+        <PipeName name="C2 Covenant" condition="begin with">\gruntsvc</PipeName>
+        <PipeName name="C2 PoshC2" condition="begin with">\jaccdpqnvbrrxlaf</PipeName>
+        <PipeName name="Credential dumpers" condition="begin with">\lsadump</PipeName>
+        <PipeName name="Credential dumpers" condition="begin with">\cachedump</PipeName>
+        <PipeName name="Credential dumpers" condition="begin with">\wceservicepipe</PipeName>
+        <PipeName name="Remote execution" condition="begin with">\PSEXESVC</PipeName>
+        <PipeName name="Remote execution" condition="begin with">\RemCom_communica</PipeName>
+        <PipeName name="Remote execution" condition="begin with">\PAExec</PipeName>
+        <PipeName name="Remote execution" condition="begin with">\csexecsvc</PipeName>
+      </PipeEvent>
+    </RuleGroup>
+
+    <!-- Event 22: DNS lookups - ONLY (a) names of tunnel, out-of-band callback, file-drop/paste and dynamic-DNS
+         services attackers use for control and exfiltration, and (b) lookups made by Windows' own tools that should
+         not be reaching the internet (the classic download-cradle LOLBins). Not ordinary browsing. -->
+    <RuleGroup name="" groupRelation="or">
+      <DnsQuery onmatch="include">
+        <QueryName name="Tunnel" condition="end with">ngrok.io</QueryName>
+        <QueryName name="Tunnel" condition="end with">ngrok.app</QueryName>
+        <QueryName name="Tunnel" condition="end with">ngrok-free.app</QueryName>
+        <QueryName name="Tunnel" condition="end with">trycloudflare.com</QueryName>
+        <QueryName name="Tunnel" condition="end with">serveo.net</QueryName>
+        <QueryName name="Tunnel" condition="end with">loca.lt</QueryName>
+        <QueryName name="Tunnel" condition="end with">localtunnel.me</QueryName>
+        <QueryName name="Tunnel" condition="end with">localhost.run</QueryName>
+        <QueryName name="Tunnel" condition="end with">portmap.io</QueryName>
+        <QueryName name="Tunnel" condition="end with">bore.pub</QueryName>
+        <QueryName name="Tunnel" condition="end with">playit.gg</QueryName>
+        <QueryName name="Tunnel" condition="end with">devtunnels.ms</QueryName>
+        <QueryName name="Callback" condition="end with">oast.fun</QueryName>
+        <QueryName name="Callback" condition="end with">oast.pro</QueryName>
+        <QueryName name="Callback" condition="end with">oast.live</QueryName>
+        <QueryName name="Callback" condition="end with">oast.site</QueryName>
+        <QueryName name="Callback" condition="end with">oast.online</QueryName>
+        <QueryName name="Callback" condition="end with">oast.me</QueryName>
+        <QueryName name="Callback" condition="end with">interact.sh</QueryName>
+        <QueryName name="Callback" condition="end with">oastify.com</QueryName>
+        <QueryName name="Callback" condition="end with">burpcollaborator.net</QueryName>
+        <QueryName name="Callback" condition="end with">dnslog.cn</QueryName>
+        <QueryName name="Callback" condition="end with">ceye.io</QueryName>
+        <QueryName name="Callback" condition="end with">requestrepo.com</QueryName>
+        <QueryName name="File drop" condition="end with">transfer.sh</QueryName>
+        <QueryName name="File drop" condition="end with">temp.sh</QueryName>
+        <QueryName name="File drop" condition="end with">file.io</QueryName>
+        <QueryName name="File drop" condition="end with">gofile.io</QueryName>
+        <QueryName name="File drop" condition="end with">bashupload.com</QueryName>
+        <QueryName name="File drop" condition="end with">sendspace.com</QueryName>
+        <QueryName name="File drop" condition="end with">mega.nz</QueryName>
+        <QueryName name="File drop" condition="end with">mega.co.nz</QueryName>
+        <QueryName name="File drop" condition="end with">mega.io</QueryName>
+        <QueryName name="File drop" condition="end with">pastebin.com</QueryName>
+        <QueryName name="File drop" condition="end with">paste.ee</QueryName>
+        <QueryName name="File drop" condition="end with">webhook.site</QueryName>
+        <QueryName name="File drop" condition="end with">pipedream.net</QueryName>
+        <QueryName name="File drop" condition="end with">api.telegram.org</QueryName>
+        <QueryName name="File drop" condition="end with">discord.com</QueryName>
+        <QueryName name="File drop" condition="end with">discordapp.com</QueryName>
+        <QueryName name="Dynamic DNS" condition="end with">duckdns.org</QueryName>
+        <QueryName name="Dynamic DNS" condition="end with">ddns.net</QueryName>
+        <QueryName name="Dynamic DNS" condition="end with">hopto.org</QueryName>
+        <QueryName name="Dynamic DNS" condition="end with">zapto.org</QueryName>
+        <QueryName name="Dynamic DNS" condition="end with">sytes.net</QueryName>
+        <Image name="LOLBin" condition="end with">\rundll32.exe</Image>
+        <Image name="LOLBin" condition="end with">\regsvr32.exe</Image>
+        <Image name="LOLBin" condition="end with">\mshta.exe</Image>
+        <Image name="LOLBin" condition="end with">\certutil.exe</Image>
+        <Image name="LOLBin" condition="end with">\bitsadmin.exe</Image>
+        <Image name="LOLBin" condition="end with">\wscript.exe</Image>
+        <Image name="LOLBin" condition="end with">\cscript.exe</Image>
+        <Image name="LOLBin" condition="end with">\msbuild.exe</Image>
+        <Image name="LOLBin" condition="end with">\installutil.exe</Image>
+        <Image name="LOLBin" condition="end with">\regasm.exe</Image>
+        <Image name="LOLBin" condition="end with">\regsvcs.exe</Image>
+        <Image name="LOLBin" condition="end with">\cmstp.exe</Image>
+        <Image name="LOLBin" condition="end with">\odbcconf.exe</Image>
+      </DnsQuery>
+    </RuleGroup>
+    <!-- ...but not those tools checking Microsoft's own services (certificate revocation, proxy discovery). -->
+    <RuleGroup name="" groupRelation="or">
+      <DnsQuery onmatch="exclude">
+        <QueryName condition="end with">.microsoft.com</QueryName>
+        <QueryName condition="end with">.windowsupdate.com</QueryName>
+        <QueryName condition="end with">.windows.com</QueryName>
+        <QueryName condition="end with">.msftncsi.com</QueryName>
+        <QueryName condition="end with">.digicert.com</QueryName>
+        <QueryName condition="is">wpad</QueryName>
+        <Image condition="begin with">C:\Program Files (x86)\ossec-agent\</Image>
+      </DnsQuery>
+    </RuleGroup>
+
     <!-- Still off: the rest would only add volume. -->
     <RuleGroup name="" groupRelation="or"><FileCreateTime onmatch="include"/></RuleGroup>
     <RuleGroup name="" groupRelation="or"><RawAccessRead onmatch="include"/></RuleGroup>
-    <RuleGroup name="" groupRelation="or"><PipeEvent onmatch="include"/></RuleGroup>
-    <RuleGroup name="" groupRelation="or"><DnsQuery onmatch="include"/></RuleGroup>
     <RuleGroup name="" groupRelation="or"><FileDelete onmatch="include"/></RuleGroup>
   </EventFiltering>
 </Sysmon>
