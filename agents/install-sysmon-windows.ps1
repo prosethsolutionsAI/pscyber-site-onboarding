@@ -8,8 +8,14 @@
   Run as Administrator. Sysmon itself comes from Microsoft (download.sysinternals.com); its
   configuration from this repository. Re-running updates the configuration in place.
   Remove: "C:\Program Files\PSCyber\Sysmon\Sysmon64.exe" -u
+
+  Ransomware decoys (since 1.9.0): a hidden "!PSCyber-check" folder in Public Documents and on each data
+  drive holds five ordinary-looking files nobody uses, and the Wazuh agent watches them in real time
+  (Windows file-change notifications - no scanning, no measurable CPU). Ransomware encrypts everything it can
+  reach, so a change there alerts the SOC within seconds of encryption starting. Skip: -NoDecoy
+  (also stops the watching; the files are left for you to delete).
 #>
-param([string]$Config)
+param([string]$Config, [switch]$NoDecoy)
 $ErrorActionPreference = "Stop"
 $Raw = "https://raw.githubusercontent.com/prosethsolutionsAI/pscyber-site-onboarding/main/agents"
 function Say($m) { Write-Host "==> $m" -ForegroundColor Cyan }
@@ -50,3 +56,71 @@ if ($svc) {
 $s = Get-Service Sysmon64, Sysmon -ErrorAction SilentlyContinue | Select-Object -First 1
 if (-not $s -or $s.Status -ne 'Running') { Die "Sysmon is not running after the install" }
 Ok "Sysmon running - registry changes on attacker-used keys are now reported in real time"
+
+# ---- Ransomware decoys (SOC rules 101330/101331) ---------------------------------------------------------
+# Files are created only when missing - an existing decoy is never rewritten (that would be a change the
+# agent reports). Our block in the agent's ossec.conf sits between two markers and is the only thing written;
+# the agent is restarted only when that block changed, and put back as it was if it then fails to start.
+$DecoyNames = 'Finance-2026.xlsx', 'Contracts-2026.docx', 'Payroll-2026.pdf', 'Passwords-backup.txt'
+function New-Decoy([string]$Path) {
+    $d = New-Item -ItemType Directory -Force -Path $Path
+    $d.Attributes = $d.Attributes -bor [IO.FileAttributes]::Hidden
+    $note = Join-Path $Path '!README-PSCyber.txt'
+    if (-not (Test-Path $note)) {
+        [IO.File]::WriteAllText($note, "PSCyber SOC security check.`r`nThe files in this folder exist only to detect ransomware: any change to them alerts the SOC at once.`r`nPlease do not open, move or delete this folder. Questions: your IT provider.`r`n")
+    }
+    $rng = New-Object Random
+    foreach ($n in $DecoyNames) {
+        $f = Join-Path $Path $n
+        if (Test-Path $f) { continue }
+        $b = New-Object byte[] (49152 + $rng.Next(32768)); $rng.NextBytes($b)
+        [IO.File]::WriteAllBytes($f, $b)
+    }
+}
+function Set-Decoys {
+    $agentDir = Join-Path ${env:ProgramFiles(x86)} 'ossec-agent'
+    $agentConf = Join-Path $agentDir 'ossec.conf'
+    if (-not (Test-Path $agentConf)) { Write-Host "  (ransomware decoys skipped: no Wazuh agent on this machine yet - re-run after installing it)"; return }
+    $begin = '<!-- PSCyber decoys BEGIN - written by install-sysmon-windows.ps1, re-run it to change -->'
+    $end = '<!-- PSCyber decoys END -->'
+    $dirs = @()
+    if (-not $NoDecoy) {
+        $dirs += Join-Path ([Environment]::GetFolderPath('CommonDocuments')) '!PSCyber-check'
+        Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' | Where-Object { $_.DeviceID -ne $env:SystemDrive } |
+            ForEach-Object { $dirs += "$($_.DeviceID)\!PSCyber-check" }
+        foreach ($p in $dirs) { try { New-Decoy $p } catch { Write-Host "  (decoy folder $p skipped: $($_.Exception.Message))" } }
+        $dirs = @($dirs | Where-Object { Test-Path $_ })
+    }
+    $old = [IO.File]::ReadAllText($agentConf)
+    $new = [regex]::Replace($old, '(?s)\r?\n?' + [regex]::Escape($begin) + '.*?' + [regex]::Escape($end), '')
+    if ($dirs.Count) {
+        $lines = ($dirs | ForEach-Object { "    <directories realtime=`"yes`" check_all=`"yes`">$_</directories>" }) -join "`r`n"
+        $new = $new.TrimEnd() + "`r`n$begin`r`n<ossec_config>`r`n  <syscheck>`r`n$lines`r`n  </syscheck>`r`n</ossec_config>`r`n$end`r`n"
+    }
+    if ($new -eq $old) {
+        if ($dirs.Count) { Ok "ransomware decoys: already in place and watched ($($dirs -join ', '))" }
+        return
+    }
+    $bak = "$agentConf.bak-decoy"
+    Copy-Item $agentConf $bak -Force
+    [IO.File]::WriteAllText($agentConf, $new)
+    $logf = Join-Path $agentDir 'ossec.log'
+    $from = if (Test-Path $logf) { (Get-Item $logf).Length } else { 0 }
+    Restart-Service WazuhSvc -ErrorAction SilentlyContinue
+    Start-Sleep 8
+    $tail = ''
+    if (Test-Path $logf) {
+        $fs = [IO.File]::Open($logf, 'Open', 'Read', 'ReadWrite')
+        try { if ($fs.Length -ge $from) { [void]$fs.Seek($from, 'Begin') }; $tail = (New-Object IO.StreamReader($fs)).ReadToEnd() } finally { $fs.Close() }
+    }
+    if ((Get-Service WazuhSvc).Status -ne 'Running' -or $tail -match '(?i)(CRITICAL|ERROR).*(configuration|XML|syscheck)') {
+        Copy-Item $bak $agentConf -Force
+        Restart-Service WazuhSvc -ErrorAction SilentlyContinue
+        Write-Host "  (ransomware decoys skipped: the agent refused the change - its configuration was put back as it was)"
+        return
+    }
+    Remove-Item $bak -Force -ErrorAction SilentlyContinue
+    if ($dirs.Count) { Ok "ransomware decoys watched in real time: $($dirs -join ', ')" }
+    else { Ok "ransomware decoys no longer watched (the folders are left - delete them by hand if you wish)" }
+}
+Set-Decoys

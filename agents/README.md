@@ -187,6 +187,14 @@ Since 1.8.0 the same configuration also reports, kept narrow so a normal machine
 Ordinary web browsing is not recorded. Machines installed before 1.8.0 keep their old configuration
 until the command below is run on them.
 
+**Ransomware decoys (1.9.0, Windows and Linux).** A hidden folder - `!PSCyber-check` in Public Documents
+and on each data drive (Windows), `.pscyber-check` in `/home`, `/opt` and `/var/www` (Linux) - holds five
+ordinary-looking files nobody uses, plus a README saying what they are. The agent watches them with the
+operating system's own change notifications (no scanning). Ransomware encrypts everything it can reach,
+so a change there alerts the SOC within seconds of encryption starting. Please do not open, move or
+delete these folders. Skip with `-NoDecoy` (Windows Sysmon script) or `--no-decoy` (Linux). The same
+Sysmon configuration also reports files named like ransom notes.
+
 Machine that already has the agent (PowerShell as Administrator):
 
 ```powershell

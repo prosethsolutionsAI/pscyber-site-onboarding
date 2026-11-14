@@ -76,6 +76,19 @@
         <TargetFilename name="T1547.001 Startup folder" condition="contains">\Start Menu\Programs\Startup\</TargetFilename>
         <TargetFilename name="T1053.005 Task file" condition="begin with">C:\Windows\System32\Tasks\</TargetFilename>
         <TargetFilename name="T1505.003 Web shell" condition="begin with">C:\inetpub\wwwroot\</TargetFilename>
+        <!-- batch 4: files named like ransom notes (rules 101332/101333 check the name and the extension) -->
+        <TargetFilename name="T1486 Ransom note" condition="contains">DECRYPT</TargetFilename>
+        <TargetFilename name="T1486 Ransom note" condition="contains">RESTORE-MY-FILES</TargetFilename>
+        <TargetFilename name="T1486 Ransom note" condition="contains">RESTORE_FILES</TargetFilename>
+        <TargetFilename name="T1486 Ransom note" condition="contains">RESTORE_MY_FILES</TargetFilename>
+        <TargetFilename name="T1486 Ransom note" condition="contains">RECOVER-FILES</TargetFilename>
+        <TargetFilename name="T1486 Ransom note" condition="contains">RECOVER_FILES</TargetFilename>
+        <TargetFilename name="T1486 Ransom note" condition="contains">HOW_TO_</TargetFilename>
+        <TargetFilename name="T1486 Ransom note" condition="contains">HOW-TO-</TargetFilename>
+        <TargetFilename name="T1486 Ransom note" condition="contains">READ_ME_TO</TargetFilename>
+        <TargetFilename name="T1486 Ransom note" condition="end with">_readme.txt</TargetFilename>
+        <TargetFilename name="T1486 Ransom note" condition="end with">.README.txt</TargetFilename>
+        <TargetFilename name="T1486 Ransom note" condition="contains">RANSOM</TargetFilename>
       </FileCreate>
     </RuleGroup>
 

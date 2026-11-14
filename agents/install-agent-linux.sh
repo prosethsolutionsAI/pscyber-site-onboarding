@@ -32,12 +32,16 @@
 #     system call (measured: unnoticeable in normal work, ~5% of a core on a server making 500k
 #     calls/s), which is why a server with no web server gets none.
 #     Force on (e.g. web containers on a Docker host): --audit     Force off: --no-audit
+#   - Ransomware decoys: a hidden .pscyber-check folder in /home, /opt (and /var/www when it exists) holds
+#     five ordinary-looking files nobody uses; the agent watches them with inotify (no scanning, no CPU).
+#     Ransomware encrypts everything it reaches, so a change there alerts the SOC within seconds.
+#     Skip: --no-decoy (stops the watching; the folders are left for you to delete)
 set -uo pipefail
 
 WAZUH_VERSION="${WAZUH_VERSION:-4.14.7}"
 COLLECTOR="${PSCYBER_COLLECTOR:-}"; GROUP="${PSCYBER_GROUP:-}"
 PASSWORD="${PSCYBER_ENROLL_PASSWORD:-}"; NAME="${PSCYBER_AGENT_NAME:-}"; HEALTH=1
-PREPARE=0; STATUS=0; SSHWATCH=1; AUDIT=auto
+PREPARE=0; STATUS=0; SSHWATCH=1; AUDIT=auto; DECOY=1
 RAW="https://raw.githubusercontent.com/prosethsolutionsAI/pscyber-site-onboarding/main/agents"
 HELPER=/usr/local/sbin/pscyber-agent
 LIB=/usr/local/lib/pscyber
@@ -57,6 +61,7 @@ while [ $# -gt 0 ]; do
     --name)      NAME="$2"; shift 2 ;;
     --no-health) HEALTH=0; shift ;;
     --no-ssh-watch) SSHWATCH=0; shift ;;
+    --no-decoy)  DECOY=0; shift ;;
     --no-audit)  AUDIT=0; shift ;;
     --audit)     AUDIT=1; shift ;;
     --prepare)   PREPARE=1; shift ;;
@@ -165,10 +170,33 @@ web_server_here() {
   return 1
 }
 
+# Ransomware decoys (SOC rules 101330/101331). Files are made only when missing - an existing decoy is never
+# rewritten, because that is exactly the change the agent reports. Prints the folders to watch.
+DECOY_NAMES="Finance-2026.xlsx Contracts-2026.docx Payroll-2026.pdf Passwords-backup.txt"
+decoy_dirs() {
+  echo /home/.pscyber-check; echo /opt/.pscyber-check
+  [ -d /var/www ] && echo /var/www/.pscyber-check
+  return 0
+}
+setup_decoys() {
+  local d n
+  for d in $(decoy_dirs); do
+    mkdir -p "$d" 2>/dev/null || continue
+    [ -f "$d/!README-PSCyber.txt" ] || printf '%s\n' "PSCyber SOC security check." \
+      "The files in this folder exist only to detect ransomware: any change to them alerts the SOC at once." \
+      "Please do not open, move or delete this folder. Questions: your IT provider." > "$d/!README-PSCyber.txt"
+    for n in $DECOY_NAMES; do
+      [ -f "$d/$n" ] || head -c $(( 49152 + RANDOM % 32768 )) /dev/urandom > "$d/$n"
+    done
+    chmod 755 "$d"; chmod 644 "$d"/* 2>/dev/null
+    echo "$d"
+  done
+}
+
 # Writes (or rewrites) our own <ossec_config> block at the end of ossec.conf. Does not restart.
 setup_detection() {
   [ -f "$CONF" ] || return 0
-  local audit_ok=0 ssh_line="" log_lines="" ws
+  local audit_ok=0 ssh_line="" log_lines="" decoy_lines="" ws d
   if [ "$AUDIT" = auto ]; then
     if ws=$(web_server_here); then AUDIT=1; say "web server found ($ws) - turning on web-shell detection"
     elif [ -f "$AUDIT_RULES" ]; then AUDIT=1   # turned on earlier (by --audit or a web server) - a re-run keeps it
@@ -176,6 +204,12 @@ setup_detection() {
   fi
   if [ "$AUDIT" = 1 ]; then setup_audit && audit_ok=1; else remove_audit; fi
   [ "$SSHWATCH" = 1 ] && ssh_line='    <directories realtime="yes" check_all="yes">/home/*/.ssh</directories>'
+  if [ "$DECOY" = 1 ]; then
+    for d in $(setup_decoys); do
+      decoy_lines="$decoy_lines${decoy_lines:+
+}    <directories realtime=\"yes\" check_all=\"yes\">$d</directories>"
+    done
+  fi
   # The agent reads audit.log only for OUR key: the customer's other audit traffic (logins, SELinux,
   # their own rules) is not forwarded - unless their configuration already reads the whole file.
   local others; others=$(sed "/$DBEGIN/,/$DEND/d" "$CONF" | grep -c '/var/log/audit/audit.log')
@@ -188,20 +222,24 @@ setup_detection() {
   fi
   cp -p "$CONF" "$CONF.bak-detect"
   sed -i "/$DBEGIN/,/$DEND/d" "$CONF"
-  if [ -n "$ssh_line$log_lines" ]; then
+  local sc="$ssh_line"
+  [ -n "$decoy_lines" ] && sc="${sc:+$sc
+}$decoy_lines"
+  if [ -n "$sc$log_lines" ]; then
     { echo "$DBEGIN"; echo "<ossec_config>"
-      [ -n "$ssh_line" ] && printf '  <syscheck>\n%s\n  </syscheck>\n' "$ssh_line"
+      [ -n "$sc" ] && printf '  <syscheck>\n%s\n  </syscheck>\n' "$sc"
       [ -n "$log_lines" ] && echo "$log_lines"
       echo "</ossec_config>"; echo "$DEND"; } >> "$CONF"
   fi
   # The agent's own parsers check the result; if they refuse it, the machine gets the file back as it was.
   if ! /var/ossec/bin/wazuh-syscheckd -t >/dev/null 2>&1 || ! /var/ossec/bin/wazuh-logcollector -t >/dev/null 2>&1; then
     mv -f "$CONF.bak-detect" "$CONF"
-    echo "  (SSH-key and web-shell detection skipped: the agent refused the configuration - nothing else changed)"
+    echo "  (SSH-key, web-shell and decoy detection skipped: the agent refused the configuration - nothing else changed)"
     return 0
   fi
   rm -f "$CONF.bak-detect"
   [ -n "$ssh_line" ] && ok "SSH keys: /home/*/.ssh watched in real time"
+  [ -n "$decoy_lines" ] && ok "ransomware decoys watched in real time: $(decoy_dirs | tr '\n' ' ')"
   [ -n "$log_lines" ] && ok "web shell: commands run by the web server account (uid 33/48) are reported - nothing else"
   if [ "$audit_ok" = 1 ] && [ "$others" != 0 ]; then
     if [ "$OWN_AUDITD" = 1 ]; then ok "web shell: commands run by the web server account (uid 33/48) are reported - nothing else is logged"
@@ -222,6 +260,7 @@ if [ "$STATUS" = 2 ]; then
     else rpm -e wazuh-agent >/dev/null 2>&1; fi || die "could not remove the wazuh-agent package"
   fi
   remove_audit   # only our web-shell rules; auditd itself stays (it may have been here before us)
+  rm -rf /home/.pscyber-check /opt/.pscyber-check /var/www/.pscyber-check   # the agent is gone, nothing reports this
   rm -rf /var/ossec "$LIB" "$HELPER"
   systemctl daemon-reload
   ok "PSCyber agent fully removed from this machine"
@@ -238,6 +277,8 @@ if [ "$STATUS" = 1 ]; then
   fi
   if [ -f "$CONF" ]; then
     grep -q '/home/\*/.ssh' "$CONF" && echo "  SSH keys: watched" || echo "  SSH keys: not watched"
+    grep -q 'pscyber-check</directories>' "$CONF" && echo "  ransomware decoys: watched ($(grep -c 'pscyber-check</directories>' "$CONF") folders)" \
+      || echo "  ransomware decoys: off"
     if [ -f "$AUDIT_RULES" ]; then
       echo "  web shell: on ($(auditctl -l 2>/dev/null | grep -c "key=$AUDIT_KEY") audit rules live)"
     else echo "  web shell: off"; fi
