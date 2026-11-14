@@ -22,12 +22,22 @@
 #   sudo pscyber-agent --status
 #   sudo pscyber-agent --uninstall   (removes the agent, health reporter and this copy;
 #                                     remove the machine in the SOC as well)
+#
+# Two small detections are switched on as well, both chosen to cost next to nothing:
+#   - SSH keys: the agent watches /home/*/.ssh in real time, so a key planted in a user's
+#     authorized_keys is reported (a handful of tiny files).            Skip: --no-ssh-watch
+#   - Web shell, ON WEB SERVERS ONLY (Apache, Nginx, PHP-FPM or Lighttpd found): the kernel logs a
+#     command ONLY when the web server's own account runs it (uid 33 www-data, uid 48 apache) and
+#     the agent forwards only those. Installs auditd if missing. Any audit rule adds ~0.1 us to every
+#     system call (measured: unnoticeable in normal work, ~5% of a core on a server making 500k
+#     calls/s), which is why a server with no web server gets none.
+#     Force on (e.g. web containers on a Docker host): --audit     Force off: --no-audit
 set -uo pipefail
 
 WAZUH_VERSION="${WAZUH_VERSION:-4.14.7}"
 COLLECTOR="${PSCYBER_COLLECTOR:-}"; GROUP="${PSCYBER_GROUP:-}"
 PASSWORD="${PSCYBER_ENROLL_PASSWORD:-}"; NAME="${PSCYBER_AGENT_NAME:-}"; HEALTH=1
-PREPARE=0; STATUS=0
+PREPARE=0; STATUS=0; SSHWATCH=1; AUDIT=auto
 RAW="https://raw.githubusercontent.com/prosethsolutionsAI/pscyber-site-onboarding/main/agents"
 HELPER=/usr/local/sbin/pscyber-agent
 LIB=/usr/local/lib/pscyber
@@ -46,6 +56,9 @@ while [ $# -gt 0 ]; do
     --password)  PASSWORD="$2"; shift 2 ;;
     --name)      NAME="$2"; shift 2 ;;
     --no-health) HEALTH=0; shift ;;
+    --no-ssh-watch) SSHWATCH=0; shift ;;
+    --no-audit)  AUDIT=0; shift ;;
+    --audit)     AUDIT=1; shift ;;
     --prepare)   PREPARE=1; shift ;;
     --status)    STATUS=1; shift ;;
     --uninstall) STATUS=2; shift ;;
@@ -63,6 +76,140 @@ ask() {
 CONF=/var/ossec/etc/ossec.conf
 LOG=/var/ossec/logs/ossec.log
 
+# ---- Detection extras (SSH keys, web shell) ------------------------------------------------
+# The SOC's rules 101250 (SSH key planted) and 101230 (web shell) see nothing without these.
+DBEGIN='<!-- PSCyber detection BEGIN - written by install-agent-linux.sh, re-run it to change -->'
+DEND='<!-- PSCyber detection END -->'
+AUDIT_RULES=/etc/audit/rules.d/pscyber-webshell.rules
+AUDIT_KEY=audit-wazuh-c   # the key Wazuh's own command rule (80792) reads
+WEB_UIDS="33 48"          # 33 www-data (Debian/Ubuntu), 48 apache (RHEL family) - what rule 101230 checks
+
+OWN_AUDITD=0             # 1 = this script installed auditd, so the audit log is ours to keep quiet
+
+audit_rule_lines() {
+  local u a
+  if [ "$OWN_AUDITD" = 1 ]; then
+    # auditd was installed BY US: drop the user-space records (every login, sudo and cron run writes 6-8)
+    # in the kernel, so the log - and what Wazuh's default agent configuration reads from it - holds only
+    # the web-account commands. Never added where auditd was already there: that log is the customer's.
+    echo "-a always,exclude -F msgtype>=1100 -F msgtype<=1199"
+    echo "-a always,exclude -F msgtype>=2100 -F msgtype<=2999"
+  fi
+  for u in $WEB_UIDS; do for a in b64 b32; do
+    echo "-a always,exit -F arch=$a -S execve -F euid=$u -k $AUDIT_KEY"
+  done; done
+}
+
+# Our kernel rules out, file and live ones - only OURS (the lines in our file), never a rule the customer wrote.
+remove_audit() {
+  [ -f "$AUDIT_RULES" ] || return 0
+  if command -v auditctl >/dev/null 2>&1; then
+    local l; while IFS= read -r l; do
+      case "$l" in "-a "*) ;; *) continue ;; esac
+      # shellcheck disable=SC2086
+      auditctl ${l/-a /-d } >/dev/null 2>&1
+    done < "$AUDIT_RULES"
+  fi
+  rm -f "$AUDIT_RULES"
+}
+
+# Returns 0 when the kernel is logging web-account commands (now, or from the next boot).
+setup_audit() {
+  grep -q 'msgtype' "$AUDIT_RULES" 2>/dev/null && OWN_AUDITD=1   # we installed it on an earlier run
+  if ! command -v auditctl >/dev/null 2>&1; then
+    OWN_AUDITD=1
+    say "installing auditd (the kernel's own audit logger) for web-shell detection"
+    { if command -v apt-get >/dev/null; then DEBIAN_FRONTEND=noninteractive apt-get install -y -q auditd
+      elif command -v dnf >/dev/null; then dnf install -y -q audit
+      elif command -v yum >/dev/null; then yum install -y -q audit
+      elif command -v zypper >/dev/null; then zypper -n -q install audit
+      fi; } >>/tmp/wazuh-agent-install.log 2>&1
+    command -v auditctl >/dev/null 2>&1 || {
+      echo "  (web-shell detection skipped: auditd could not be installed - the server's package mirror"
+      echo "   was not reachable. Install 'auditd' (Debian/Ubuntu) or 'audit' (RHEL) and re-run this script.)"
+      return 1; }
+  fi
+  systemctl enable --now auditd >/dev/null 2>&1
+  remove_audit   # a re-run starts from a clean slate of OUR rules (the set may have changed)
+  mkdir -p "$(dirname "$AUDIT_RULES")"
+  { echo "## PSCyber SOC - web-shell detection (rule 101230). Logs a command ONLY when the web server's"
+    echo "## own account runs it: uid 33 www-data (Debian/Ubuntu), uid 48 apache (RHEL family)."
+    echo "## Nothing any other account runs is logged. Remove: sudo pscyber-agent --no-audit ..."
+    [ "$OWN_AUDITD" = 1 ] && echo "## auditd was installed for this alone, so login/sudo/cron records are not kept (msgtype lines)."
+    audit_rule_lines; } > "$AUDIT_RULES"
+  chmod 640 "$AUDIT_RULES"
+  if auditctl -s 2>/dev/null | grep -q '^enabled 2'; then
+    echo "  (web-shell detection: this server's audit rules are locked until reboot - it starts after the next reboot)"
+    return 0
+  fi
+  # Added live, one at a time, beside whatever the customer already has ("Rule exists" is fine).
+  # b32 is refused on a kernel without 32-bit support - harmless, nothing 32-bit can run there.
+  local l; while IFS= read -r l; do
+    # shellcheck disable=SC2086
+    auditctl $l >/dev/null 2>&1
+  done < <(audit_rule_lines)
+  auditctl -l 2>/dev/null | grep -q "key=$AUDIT_KEY" \
+    || { echo "  (web-shell detection skipped: the kernel refused the audit rule)"; remove_audit; return 1; }
+  return 0
+}
+
+# A web server on this machine? Only then is web-shell logging worth its cost.
+web_server_here() {
+  local b
+  for b in apache2 httpd nginx lighttpd; do
+    command -v "$b" >/dev/null 2>&1 && { echo "$b"; return 0; }
+    [ -x "/usr/sbin/$b" ] && { echo "$b"; return 0; }
+  done
+  b=$(ls /usr/sbin/php-fpm* /usr/sbin/php*-fpm* 2>/dev/null | head -1)
+  [ -n "$b" ] && { basename "$b"; return 0; }
+  return 1
+}
+
+# Writes (or rewrites) our own <ossec_config> block at the end of ossec.conf. Does not restart.
+setup_detection() {
+  [ -f "$CONF" ] || return 0
+  local audit_ok=0 ssh_line="" log_lines="" ws
+  if [ "$AUDIT" = auto ]; then
+    if ws=$(web_server_here); then AUDIT=1; say "web server found ($ws) - turning on web-shell detection"
+    elif [ -f "$AUDIT_RULES" ]; then AUDIT=1   # turned on earlier (by --audit or a web server) - a re-run keeps it
+    else AUDIT=0; echo "  (no web server on this machine - web-shell logging not needed, nothing added. Force with --audit)"; fi
+  fi
+  if [ "$AUDIT" = 1 ]; then setup_audit && audit_ok=1; else remove_audit; fi
+  [ "$SSHWATCH" = 1 ] && ssh_line='    <directories realtime="yes" check_all="yes">/home/*/.ssh</directories>'
+  # The agent reads audit.log only for OUR key: the customer's other audit traffic (logins, SELinux,
+  # their own rules) is not forwarded - unless their configuration already reads the whole file.
+  local others; others=$(sed "/$DBEGIN/,/$DEND/d" "$CONF" | grep -c '/var/log/audit/audit.log')
+  if [ "$audit_ok" = 1 ] && [ "$others" = 0 ]; then
+    log_lines='  <localfile>
+    <log_format>audit</log_format>
+    <location>/var/log/audit/audit.log</location>
+    <restrict type="PCRE2">key="'"$AUDIT_KEY"'"</restrict>
+  </localfile>'
+  fi
+  cp -p "$CONF" "$CONF.bak-detect"
+  sed -i "/$DBEGIN/,/$DEND/d" "$CONF"
+  if [ -n "$ssh_line$log_lines" ]; then
+    { echo "$DBEGIN"; echo "<ossec_config>"
+      [ -n "$ssh_line" ] && printf '  <syscheck>\n%s\n  </syscheck>\n' "$ssh_line"
+      [ -n "$log_lines" ] && echo "$log_lines"
+      echo "</ossec_config>"; echo "$DEND"; } >> "$CONF"
+  fi
+  # The agent's own parsers check the result; if they refuse it, the machine gets the file back as it was.
+  if ! /var/ossec/bin/wazuh-syscheckd -t >/dev/null 2>&1 || ! /var/ossec/bin/wazuh-logcollector -t >/dev/null 2>&1; then
+    mv -f "$CONF.bak-detect" "$CONF"
+    echo "  (SSH-key and web-shell detection skipped: the agent refused the configuration - nothing else changed)"
+    return 0
+  fi
+  rm -f "$CONF.bak-detect"
+  [ -n "$ssh_line" ] && ok "SSH keys: /home/*/.ssh watched in real time"
+  [ -n "$log_lines" ] && ok "web shell: commands run by the web server account (uid 33/48) are reported - nothing else"
+  if [ "$audit_ok" = 1 ] && [ "$others" != 0 ]; then
+    if [ "$OWN_AUDITD" = 1 ]; then ok "web shell: commands run by the web server account (uid 33/48) are reported - nothing else is logged"
+    else ok "web shell: commands run by the web server account are logged (this server's existing audit log is read as before)"; fi
+  fi
+  return 0
+}
+
 if [ "$STATUS" = 2 ]; then
   # Everything these scripts put on the machine - and nothing else.
   # The site COLLECTOR runs its own wazuh-agent: removing it here would take the whole site off the SOC.
@@ -74,6 +221,7 @@ if [ "$STATUS" = 2 ]; then
     if command -v apt-get >/dev/null; then apt-get purge -y -qq wazuh-agent >/dev/null 2>&1
     else rpm -e wazuh-agent >/dev/null 2>&1; fi || die "could not remove the wazuh-agent package"
   fi
+  remove_audit   # only our web-shell rules; auditd itself stays (it may have been here before us)
   rm -rf /var/ossec "$LIB" "$HELPER"
   systemctl daemon-reload
   ok "PSCyber agent fully removed from this machine"
@@ -88,6 +236,12 @@ if [ "$STATUS" = 1 ]; then
     echo "ON: agent $(systemctl is-active wazuh-agent 2>/dev/null), manager $(sed -n 's/.*<address>\([^<]*\)<\/address>.*/\1/p' "$CONF" | head -1)"
     grep -h '^status=' /var/ossec/var/run/wazuh-agentd.state 2>/dev/null | sed 's/^/  /'
   fi
+  if [ -f "$CONF" ]; then
+    grep -q '/home/\*/.ssh' "$CONF" && echo "  SSH keys: watched" || echo "  SSH keys: not watched"
+    if [ -f "$AUDIT_RULES" ]; then
+      echo "  web shell: on ($(auditctl -l 2>/dev/null | grep -c "key=$AUDIT_KEY") audit rules live)"
+    else echo "  web shell: off"; fi
+  fi
   exit 0
 fi
 
@@ -99,11 +253,11 @@ install_helper() {
   mkdir -p "$(dirname "$HELPER")" "$LIB"
   local d="$SELFDIR"
   if [ -f "$SELF" ] && grep -q 'pscyber-agent' "$SELF" 2>/dev/null; then cp "$SELF" "$HELPER.new"
-  else curl -fsSL "$RAW/install-agent-linux.sh" -o "$HELPER.new"; fi \
+  else curl -fsSL --proto '=https' --proto-redir '=https' "$RAW/install-agent-linux.sh" -o "$HELPER.new"; fi \
     && grep -q 'pscyber-agent' "$HELPER.new" && chmod 755 "$HELPER.new" && mv -f "$HELPER.new" "$HELPER" \
     || { rm -f "$HELPER.new"; echo "  (could not keep a local copy - turning it on later needs the curl line again)"; }
   if [ -f "$d/pscyber-metrics.sh" ]; then cp "$d/pscyber-metrics.sh" "$LIB/pscyber-metrics.sh"
-  else curl -fsSL "$RAW/pscyber-metrics.sh" -o "$LIB/pscyber-metrics.sh" 2>/dev/null || rm -f "$LIB/pscyber-metrics.sh"; fi
+  else curl -fsSL --proto '=https' --proto-redir '=https' "$RAW/pscyber-metrics.sh" -o "$LIB/pscyber-metrics.sh" 2>/dev/null || rm -f "$LIB/pscyber-metrics.sh"; fi
 }
 
 install_package() {  # $1 = label for the messages
@@ -145,6 +299,7 @@ if [ "$PREPARE" = 1 ]; then
     install_package "(ready mode - not started)"
   fi
   systemctl disable --now wazuh-agent >/dev/null 2>&1 || true
+  setup_detection
   touch "$MARK"
   install_helper
   ok "READY: the Wazuh agent is installed but STOPPED - pointed at nothing, sending nothing"
@@ -184,6 +339,7 @@ if [ -f "$MARK" ] && [ -x /var/ossec/bin/agent-auth ]; then
   rm -f "$PASSF"
   [ "$rc" = 0 ] || { tail -3 /tmp/wazuh-agent-enrol.log; die "enrolment refused (see /tmp/wazuh-agent-enrol.log and 'Common problems' in agents/README.md)"; }
   rm -f "$MARK"
+  setup_detection
   systemctl daemon-reload
   systemctl enable --now wazuh-agent >/dev/null 2>&1 || die "wazuh-agent did not start (journalctl -u wazuh-agent)"
 elif [ -x /var/ossec/bin/wazuh-control ] && [ -f "$CONF" ]; then
@@ -192,6 +348,7 @@ elif [ -x /var/ossec/bin/wazuh-control ] && [ -f "$CONF" ]; then
   say "a Wazuh agent is already installed - pointing it at the collector $COLLECTOR"
   cp -p "$CONF" "$CONF.bak-$(date +%Y%m%d%H%M%S)"
   sed -i "0,/<address>[^<]*<\/address>/s//<address>$COLLECTOR<\/address>/" "$CONF"
+  setup_detection
   systemctl restart wazuh-agent || die "wazuh-agent did not restart (journalctl -u wazuh-agent)"
 else
   [ -n "$GROUP" ] || ask "Agent group (pscyber-collector site-agent-command shows it)" GROUP
@@ -212,6 +369,7 @@ else
   [ -n "$PASSWORD" ] && export WAZUH_REGISTRATION_PASSWORD="$PASSWORD"
   install_package "as $NAME in group $GROUP"
   unset WAZUH_REGISTRATION_PASSWORD
+  setup_detection
   systemctl daemon-reload
   systemctl enable --now wazuh-agent >/dev/null 2>&1 || die "wazuh-agent did not start (journalctl -u wazuh-agent)"
 fi
@@ -228,11 +386,14 @@ install_health() {
   local src; src="$SELFDIR/pscyber-metrics.sh"
   [ -f "$src" ] || src="$LIB/pscyber-metrics.sh"   # the copy --prepare kept
   if [ ! -f "$src" ]; then
-    src=/tmp/pscyber-metrics.sh
-    curl -sfo "$src" "$RAW/pscyber-metrics.sh" || { echo "  (device health skipped: could not download pscyber-metrics.sh)"; return; }
+    src="$(mktemp)"  # a private temporary file, never a fixed name in /tmp (this runs as root)
+    curl -sf --proto '=https' --proto-redir '=https' -o "$src" "$RAW/pscyber-metrics.sh" \
+      || { rm -f "$src"; echo "  (device health skipped: could not download pscyber-metrics.sh)"; return; }
   fi
   umask 077
-  printf 'REPORT_URL="http://%s:1520/report"\nTOKEN=""\nCURL_TLS=""\n' "$COLLECTOR" > /etc/pscyber-metrics.conf
+  # Plain HTTP on purpose, reviewed: this machine reports CPU / memory / disk to the site collector on the same
+  # LAN (port 1520), with no token and nothing secret in it; the collector forwards it to the SOC over mutual TLS.
+  printf 'REPORT_URL="http://%s:1520/report"\nTOKEN=""\nCURL_TLS=""\n' "$COLLECTOR" > /etc/pscyber-metrics.conf  # NOSONAR
   install -m 700 "$src" /usr/local/bin/pscyber-metrics
   cat > /etc/systemd/system/pscyber-metrics.service <<'EOF'
 [Unit]
