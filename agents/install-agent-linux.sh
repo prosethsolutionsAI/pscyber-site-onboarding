@@ -23,15 +23,23 @@
 #   sudo pscyber-agent --uninstall   (removes the agent, health reporter and this copy;
 #                                     remove the machine in the SOC as well)
 #
-# Two small detections are switched on as well, both chosen to cost next to nothing:
+# auditd (the kernel's own audit logger) is installed if missing, on EVERY server: File integrity's
+# "who changed it" (the user and the program behind a change) runs on it, and with it a watched
+# folder created AFTER the watch is picked up by itself - without it the agent falls back to plain
+# real time, Who/Program stay empty and a folder made later needs an agent restart (found live).
+# auditd alone logs nothing extra to the SOC: the agent does not read its log, and FIM adds a rule
+# only for the folders someone chose to watch. When this script installed auditd, login/sudo/cron
+# records are dropped in the kernel so its local log stays small.     Skip: --no-audit
+#
+# Small detections are switched on as well, all chosen to cost next to nothing:
 #   - SSH keys: the agent watches /home/*/.ssh in real time, so a key planted in a user's
 #     authorized_keys is reported (a handful of tiny files).            Skip: --no-ssh-watch
 #   - Web shell, ON WEB SERVERS ONLY (Apache, Nginx, PHP-FPM or Lighttpd found): the kernel logs a
 #     command ONLY when the web server's own account runs it (uid 33 www-data, uid 48 apache) and
-#     the agent forwards only those. Installs auditd if missing. Any audit rule adds ~0.1 us to every
-#     system call (measured: unnoticeable in normal work, ~5% of a core on a server making 500k
-#     calls/s), which is why a server with no web server gets none.
-#     Force on (e.g. web containers on a Docker host): --audit     Force off: --no-audit
+#     the agent forwards only those. Any audit rule adds ~0.1 us to every system call (measured:
+#     unnoticeable in normal work, ~5% of a core on a server making 500k calls/s), which is why a
+#     server with no web server gets none.
+#     Force on (e.g. web containers on a Docker host): --audit     Force off: --no-audit (also skips auditd)
 #   - Ransomware decoys: a hidden .pscyber-check folder in /home, /opt (and /var/www when it exists) holds
 #     five ordinary-looking files nobody uses; the agent watches them with inotify (no scanning, no CPU).
 #     Ransomware encrypts everything it reaches, so a change there alerts the SOC within seconds.
@@ -86,61 +94,93 @@ LOG=/var/ossec/logs/ossec.log
 DBEGIN='<!-- PSCyber detection BEGIN - written by install-agent-linux.sh, re-run it to change -->'
 DEND='<!-- PSCyber detection END -->'
 AUDIT_RULES=/etc/audit/rules.d/pscyber-webshell.rules
+AUDIT_QUIET=/etc/audit/rules.d/pscyber-quiet.rules   # only where THIS script installed auditd
 AUDIT_KEY=audit-wazuh-c   # the key Wazuh's own command rule (80792) reads
 WEB_UIDS="33 48"          # 33 www-data (Debian/Ubuntu), 48 apache (RHEL family) - what rule 101230 checks
 
 OWN_AUDITD=0             # 1 = this script installed auditd, so the audit log is ours to keep quiet
 
+quiet_rule_lines() {
+  # auditd was installed BY US: drop the user-space records (every login, sudo and cron run writes 6-8)
+  # in the kernel, so the local log holds only what a rule asked for (FIM's watched folders, web-account
+  # commands). The syscall records FIM's who-data reads are not in these ranges. Never added where
+  # auditd was already there: that log is the customer's.
+  echo "-a always,exclude -F msgtype>=1100 -F msgtype<=1199"
+  echo "-a always,exclude -F msgtype>=2100 -F msgtype<=2999"
+}
+
 audit_rule_lines() {
   local u a
-  if [ "$OWN_AUDITD" = 1 ]; then
-    # auditd was installed BY US: drop the user-space records (every login, sudo and cron run writes 6-8)
-    # in the kernel, so the log - and what Wazuh's default agent configuration reads from it - holds only
-    # the web-account commands. Never added where auditd was already there: that log is the customer's.
-    echo "-a always,exclude -F msgtype>=1100 -F msgtype<=1199"
-    echo "-a always,exclude -F msgtype>=2100 -F msgtype<=2999"
-  fi
   for u in $WEB_UIDS; do for a in b64 b32; do
     echo "-a always,exit -F arch=$a -S execve -F euid=$u -k $AUDIT_KEY"
   done; done
 }
 
-# Our kernel rules out, file and live ones - only OURS (the lines in our file), never a rule the customer wrote.
-remove_audit() {
-  [ -f "$AUDIT_RULES" ] || return 0
+# Our kernel rules out, file and live ones - only OURS (the lines in the file), never a rule the customer wrote.
+remove_rules_file() {
+  [ -f "$1" ] || return 0
   if command -v auditctl >/dev/null 2>&1; then
     local l; while IFS= read -r l; do
       case "$l" in "-a "*) ;; *) continue ;; esac
       # shellcheck disable=SC2086
       auditctl ${l/-a /-d } >/dev/null 2>&1
-    done < "$AUDIT_RULES"
+    done < "$1"
   fi
-  rm -f "$AUDIT_RULES"
+  rm -f "$1"
 }
+remove_audit() { remove_rules_file "$AUDIT_RULES"; }
 
-# Returns 0 when the kernel is logging web-account commands (now, or from the next boot).
-setup_audit() {
-  grep -q 'msgtype' "$AUDIT_RULES" 2>/dev/null && OWN_AUDITD=1   # we installed it on an earlier run
+# auditd installed and running - for File integrity's who-data (and the web-shell rules). Returns 0 when it runs.
+ensure_auditd() {
+  # we installed it on an earlier run (older versions kept the msgtype lines in the web-shell file)
+  { [ -f "$AUDIT_QUIET" ] || grep -q 'msgtype' "$AUDIT_RULES" 2>/dev/null; } && OWN_AUDITD=1
   if ! command -v auditctl >/dev/null 2>&1; then
     OWN_AUDITD=1
-    say "installing auditd (the kernel's own audit logger) for web-shell detection"
+    say "installing auditd (the kernel's own audit logger) - File integrity records WHO changed a file"
     { if command -v apt-get >/dev/null; then DEBIAN_FRONTEND=noninteractive apt-get install -y -q auditd
       elif command -v dnf >/dev/null; then dnf install -y -q audit
       elif command -v yum >/dev/null; then yum install -y -q audit
       elif command -v zypper >/dev/null; then zypper -n -q install audit
       fi; } >>/tmp/wazuh-agent-install.log 2>&1
     command -v auditctl >/dev/null 2>&1 || {
-      echo "  (web-shell detection skipped: auditd could not be installed - the server's package mirror"
-      echo "   was not reachable. Install 'auditd' (Debian/Ubuntu) or 'audit' (RHEL) and re-run this script.)"
+      echo "  (auditd could not be installed - the server's package mirror was not reachable. File integrity"
+      echo "   still reports changes, without who/program. Install 'auditd' (Debian/Ubuntu) or 'audit' (RHEL)"
+      echo "   and re-run this script.)"
       return 1; }
   fi
   systemctl enable --now auditd >/dev/null 2>&1
+  # Wazuh's own audit plugin (written by the agent the first time who-data starts) feeds the agent through a
+  # socket. Where auditd was removed and comes back, that socket FILE is left behind and the plugin dies with
+  # "Address already in use" - the agent then silently falls back to plain real time (found live). Clear it.
+  if [ -f /etc/audit/plugins.d/af_wazuh.conf ] && ! pgrep -f 'audisp-af_unix.*ossec' >/dev/null 2>&1; then
+    rm -f /var/ossec/queue/sockets/audit
+    systemctl restart auditd >/dev/null 2>&1
+  fi
+  # An older run kept the quiet lines inside the web-shell file: take that file out NOW (setup_audit writes it
+  # again without them), or removing it later would delete the quiet rules just added below.
+  grep -q 'msgtype' "$AUDIT_RULES" 2>/dev/null && remove_audit
+  if [ "$OWN_AUDITD" = 1 ]; then
+    remove_rules_file "$AUDIT_QUIET"
+    mkdir -p "$(dirname "$AUDIT_QUIET")"
+    { echo "## PSCyber SOC - auditd was installed by install-agent-linux.sh, so login/sudo/cron records are"
+      echo "## not kept: the local audit log holds only what a rule asked for."
+      quiet_rule_lines; } > "$AUDIT_QUIET"
+    chmod 640 "$AUDIT_QUIET"
+    local l; while IFS= read -r l; do
+      # shellcheck disable=SC2086
+      auditctl $l >/dev/null 2>&1   # "Rule exists" / locked kernel: harmless, the file applies at boot
+    done < <(quiet_rule_lines)
+  fi
+  systemctl is-active --quiet auditd
+}
+
+# Returns 0 when the kernel is logging web-account commands (now, or from the next boot).
+setup_audit() {
   remove_audit   # a re-run starts from a clean slate of OUR rules (the set may have changed)
   mkdir -p "$(dirname "$AUDIT_RULES")"
   { echo "## PSCyber SOC - web-shell detection (rule 101230). Logs a command ONLY when the web server's"
     echo "## own account runs it: uid 33 www-data (Debian/Ubuntu), uid 48 apache (RHEL family)."
     echo "## Nothing any other account runs is logged. Remove: sudo pscyber-agent --no-audit ..."
-    [ "$OWN_AUDITD" = 1 ] && echo "## auditd was installed for this alone, so login/sudo/cron records are not kept (msgtype lines)."
     audit_rule_lines; } > "$AUDIT_RULES"
   chmod 640 "$AUDIT_RULES"
   if auditctl -s 2>/dev/null | grep -q '^enabled 2'; then
@@ -196,13 +236,24 @@ setup_decoys() {
 # Writes (or rewrites) our own <ossec_config> block at the end of ossec.conf. Does not restart.
 setup_detection() {
   [ -f "$CONF" ] || return 0
-  local audit_ok=0 ssh_line="" log_lines="" decoy_lines="" ws d
-  if [ "$AUDIT" = auto ]; then
-    if ws=$(web_server_here); then AUDIT=1; say "web server found ($ws) - turning on web-shell detection"
-    elif [ -f "$AUDIT_RULES" ]; then AUDIT=1   # turned on earlier (by --audit or a web server) - a re-run keeps it
-    else AUDIT=0; echo "  (no web server on this machine - web-shell logging not needed, nothing added. Force with --audit)"; fi
+  local audit_ok=0 who_ok=0 web=0 ssh_line="" log_lines="" decoy_lines="" ws d
+  # Web shell: decided BEFORE auditd is touched (a re-run keeps an earlier choice, read from our rules file).
+  if [ "$AUDIT" = 1 ]; then web=1
+  elif [ "$AUDIT" = auto ]; then
+    if ws=$(web_server_here); then web=1; say "web server found ($ws) - turning on web-shell detection"
+    elif [ -f "$AUDIT_RULES" ]; then web=1   # turned on earlier (by --audit or a web server) - a re-run keeps it
+    else echo "  (no web server on this machine - web-shell logging not needed. Force with --audit)"; fi
   fi
-  if [ "$AUDIT" = 1 ]; then setup_audit && audit_ok=1; else remove_audit; fi
+  if [ "$AUDIT" = 0 ]; then
+    remove_audit   # --no-audit: no web-shell rules, auditd not installed (one already here is left alone)
+    echo "  (--no-audit: File integrity reports changes without who/program; a folder created after it is"
+    echo "   watched needs an agent restart)"
+  elif ensure_auditd; then
+    who_ok=1
+    if [ "$web" = 1 ]; then setup_audit && audit_ok=1; else remove_audit; fi
+  else
+    remove_audit
+  fi
   [ "$SSHWATCH" = 1 ] && ssh_line='    <directories realtime="yes" check_all="yes">/home/*/.ssh</directories>'
   if [ "$DECOY" = 1 ]; then
     for d in $(setup_decoys); do
@@ -238,6 +289,7 @@ setup_detection() {
     return 0
   fi
   rm -f "$CONF.bak-detect"
+  [ "$who_ok" = 1 ] && ok "auditd running - File integrity records who changed a file (user + program); new watched folders need no restart"
   [ -n "$ssh_line" ] && ok "SSH keys: /home/*/.ssh watched in real time"
   [ -n "$decoy_lines" ] && ok "ransomware decoys watched in real time: $(decoy_dirs | tr '\n' ' ')"
   [ -n "$log_lines" ] && ok "web shell: commands run by the web server account (uid 33/48) are reported - nothing else"
@@ -259,7 +311,7 @@ if [ "$STATUS" = 2 ]; then
     if command -v apt-get >/dev/null; then apt-get purge -y -qq wazuh-agent >/dev/null 2>&1
     else rpm -e wazuh-agent >/dev/null 2>&1; fi || die "could not remove the wazuh-agent package"
   fi
-  remove_audit   # only our web-shell rules; auditd itself stays (it may have been here before us)
+  remove_audit; remove_rules_file "$AUDIT_QUIET"   # only OUR rules; auditd itself stays (it may have been here before us)
   rm -rf /home/.pscyber-check /opt/.pscyber-check /var/www/.pscyber-check   # the agent is gone, nothing reports this
   rm -rf /var/ossec "$LIB" "$HELPER"
   systemctl daemon-reload
@@ -279,6 +331,8 @@ if [ "$STATUS" = 1 ]; then
     grep -q '/home/\*/.ssh' "$CONF" && echo "  SSH keys: watched" || echo "  SSH keys: not watched"
     grep -q 'pscyber-check</directories>' "$CONF" && echo "  ransomware decoys: watched ($(grep -c 'pscyber-check</directories>' "$CONF") folders)" \
       || echo "  ransomware decoys: off"
+    if systemctl is-active --quiet auditd 2>/dev/null; then echo "  auditd: running (File integrity records who changed a file)"
+    else echo "  auditd: NOT running - File integrity has no who/program (re-run this script to install it)"; fi
     if [ -f "$AUDIT_RULES" ]; then
       echo "  web shell: on ($(auditctl -l 2>/dev/null | grep -c "key=$AUDIT_KEY") audit rules live)"
     else echo "  web shell: off"; fi

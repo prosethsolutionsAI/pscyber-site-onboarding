@@ -30,6 +30,19 @@ Send Proseth the **Directory (tenant) ID** and the **Application (client) ID**
 the command in step 2 - your IT or a Proseth engineer on a call with you. It
 stays on the collector only.
 
+### Microsoft Defender alerts (optional, recommended)
+
+The same app can also hand over every **Microsoft Defender XDR alert and incident**
+(Defender for Endpoint, Office 365, Identity, Cloud Apps, Entra ID Protection) -
+checked every 5 minutes through Microsoft Graph. Each Defender incident becomes one
+case at the SOC, with Defender's own title, machine and user.
+
+In the same app: **API permissions** → **Add a permission** → **Microsoft Graph** →
+**Application permissions** → tick **SecurityAlert.Read.All** and
+**SecurityIncident.Read.All** → **Add** → **Grant admin consent**. Both are read-only.
+
+The collector's Wazuh agent must be 4.6 or newer (the command checks).
+
 ## 2. Run one command on the site collector
 
 On the collector, as a user with sudo. Put your two IDs in place of the `<...>`:
@@ -54,6 +67,12 @@ Options - add them after `sudo`, before `bash`:
 |---|---|---|
 | `PSCYBER_O365_SUBS='Audit.AzureActiveDirectory,Audit.Exchange'` | all five | Only some log types. Choose from `Audit.AzureActiveDirectory`, `Audit.Exchange`, `Audit.SharePoint`, `Audit.General`, `DLP.All` |
 | `PSCYBER_O365_API_TYPE='gcc'` | `commercial` | US Government clouds: `gcc` or `gcc-high` |
+| `PSCYBER_O365_DEFENDER=1` | off | Also pull Microsoft Defender alerts and incidents. With `PSCYBER_O365_SUBS=''` it pulls Defender only |
+
+About the secret with Defender: Wazuh's Microsoft Graph module can only read the
+secret from its own configuration, so for Defender it is written into the agent's
+`ossec.conf` - which only root and Wazuh can read, like the secret file. The
+command never shows it and never puts it on a command line.
 
 What the command does:
 
@@ -74,7 +93,7 @@ The collector needs **outbound TCP 443** to:
 
 | Cloud | Hosts |
 |---|---|
-| Normal Microsoft 365 | `login.microsoftonline.com`, `manage.office.com` |
+| Normal Microsoft 365 | `login.microsoftonline.com`, `manage.office.com` (+ `graph.microsoft.com` for Defender) |
 | US Government GCC | `login.microsoftonline.com`, `manage-gcc.office.com` |
 | US Government GCC High | `login.microsoftonline.us`, `manage.office365.us` |
 

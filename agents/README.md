@@ -36,25 +36,30 @@ iwr -UseBasicParsing https://raw.githubusercontent.com/prosethsolutionsAI/pscybe
 
 ## What the Linux line also switches on (and what it costs)
 
-The same one line also turns on two small detections. Nothing else needs to be run.
+The same one line also installs `auditd` and turns on a few small detections. Nothing else needs to be run.
 
 | | What | Where | Cost (measured, 2026-11-14) |
 |---|---|---|---|
+| **auditd** | the kernel's own audit logger, installed if missing. File integrity uses it to record **who** changed a watched file (the user and the program), and to pick up a watched folder that is created **after** the watch without an agent restart. Without it File integrity still reports changes, with Who/Program empty | every Linux machine | nothing on its own: it adds a rule only for folders someone chose to watch in the SOC, and the agent does not send its log anywhere |
 | **SSH keys** | `/home/*/.ssh` watched in real time, so a key planted in a user's `authorized_keys` is reported | every Linux machine | a few tiny files - nothing measurable |
-| **Web shell** | the kernel logs a command **only** when the web server's own account runs it (uid 33 `www-data`, 48 `apache`); the agent forwards only those | **only where a web server is found** (Apache, Nginx, PHP-FPM, Lighttpd) - installs `auditd` if missing | about 0.1 µs on every system call: no difference in normal work (gzip, file access, program starts), about 5% of one core on a server making 500,000 calls a second. That is why a server without a web server gets none |
+| **Web shell** | the kernel logs a command **only** when the web server's own account runs it (uid 33 `www-data`, 48 `apache`); the agent forwards only those | **only where a web server is found** (Apache, Nginx, PHP-FPM, Lighttpd) | about 0.1 µs on every system call: no difference in normal work (gzip, file access, program starts), about 5% of one core on a server making 500,000 calls a second. That is why a server without a web server gets none |
 
 The agent itself, idle: about 60 MB of memory and under 0.1% of one CPU core. With the web-shell
 logging on, the audit log grows only when the web account runs a command - **0 bytes a minute**
 otherwise. When the script installed `auditd` itself, login / sudo / cron records are dropped in the
-kernel so the log holds only these commands; a server that already had `auditd` keeps its log as it was.
+kernel so the log holds only what a rule asked for; a server that already had `auditd` keeps its log as it was.
+
+**A server installed before this change** has no `auditd` unless it runs a web server. Re-run the same
+install line once (it re-points nothing and keeps the agent's key) - or `sudo apt install -y auditd`
+(`dnf install -y audit` on RHEL) followed by `sudo systemctl restart wazuh-agent`.
 
 | Option | |
 |---|---|
 | `--audit` | web-shell logging on even with no web server found - e.g. web applications in Docker containers |
-| `--no-audit` | off (also removes it on a re-run) |
+| `--no-audit` | no web-shell logging and no `auditd` install (removes our rules on a re-run; an `auditd` already there stays) |
 | `--no-ssh-watch` | no SSH-key watch |
 
-`sudo pscyber-agent --status` shows both. Uninstall removes our audit rules only; `auditd` stays.
+`sudo pscyber-agent --status` shows all three. Uninstall removes our audit rules only; `auditd` stays.
 The SSH watch picks up a user's `.ssh` created later at the agent's next full scan (every 12 hours).
 
 ## Ready now, turn on later (and uninstall)
