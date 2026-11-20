@@ -40,6 +40,8 @@
 #     unnoticeable in normal work, ~5% of a core on a server making 500k calls/s), which is why a
 #     server with no web server gets none.
 #     Force on (e.g. web containers on a Docker host): --audit     Force off: --no-audit (also skips auditd)
+#   - aaPanel (found by /www/server/panel): the agent also reads its website logs (/www/wwwlogs/*.log) and its
+#     panel's request log (logins), and the web-shell rule covers aaPanel's own account `www`, whatever its uid.
 #   - Ransomware decoys: a hidden .pscyber-check folder in /home, /opt (and /var/www when it exists) holds
 #     five ordinary-looking files nobody uses; the agent watches them with inotify (no scanning, no CPU).
 #     Ransomware encrypts everything it reaches, so a change there alerts the SOC within seconds.
@@ -97,6 +99,17 @@ AUDIT_RULES=/etc/audit/rules.d/pscyber-webshell.rules
 AUDIT_QUIET=/etc/audit/rules.d/pscyber-quiet.rules   # only where THIS script installed auditd
 AUDIT_KEY=audit-wazuh-c   # the key Wazuh's own command rule (80792) reads
 WEB_UIDS="33 48"          # 33 www-data (Debian/Ubuntu), 48 apache (RHEL family) - what rule 101230 checks
+# aaPanel runs its sites as the account `www`, whose uid is whatever was free when it was installed (1000 on a fresh
+# server) - no rule can name it. Its commands go under their OWN key, which rule 101231 reads.
+AAPANEL_KEY=pscyber-webacct
+aapanel_here() { [ -d /www/server/panel ] && [ -d /www/wwwlogs ]; }
+# The uid of aaPanel's `www`, or nothing (not aaPanel, no such account, or it IS one of the uids above / root).
+aapanel_www_uid() {
+  aapanel_here || return 0
+  local u; u=$(id -u www 2>/dev/null) || return 0
+  case " 0 $WEB_UIDS " in *" $u "*) return 0 ;; esac
+  echo "$u"
+}
 
 OWN_AUDITD=0             # 1 = this script installed auditd, so the audit log is ours to keep quiet
 
@@ -114,6 +127,11 @@ audit_rule_lines() {
   for u in $WEB_UIDS; do for a in b64 b32; do
     echo "-a always,exit -F arch=$a -S execve -F euid=$u -k $AUDIT_KEY"
   done; done
+  u=$(aapanel_www_uid)
+  [ -n "$u" ] && for a in b64 b32; do
+    echo "-a always,exit -F arch=$a -S execve -F euid=$u -k $AAPANEL_KEY"
+  done
+  return 0
 }
 
 # Our kernel rules out, file and live ones - only OURS (the lines in the file), never a rule the customer wrote.
@@ -178,8 +196,9 @@ ensure_auditd() {
 setup_audit() {
   remove_audit   # a re-run starts from a clean slate of OUR rules (the set may have changed)
   mkdir -p "$(dirname "$AUDIT_RULES")"
-  { echo "## PSCyber SOC - web-shell detection (rule 101230). Logs a command ONLY when the web server's"
-    echo "## own account runs it: uid 33 www-data (Debian/Ubuntu), uid 48 apache (RHEL family)."
+  { echo "## PSCyber SOC - web-shell detection (rules 101230/101231). Logs a command ONLY when the web server's"
+    echo "## own account runs it: uid 33 www-data (Debian/Ubuntu), uid 48 apache (RHEL family), and on an"
+    echo "## aaPanel server its account www (key $AAPANEL_KEY)."
     echo "## Nothing any other account runs is logged. Remove: sudo pscyber-agent --no-audit ..."
     audit_rule_lines; } > "$AUDIT_RULES"
   chmod 640 "$AUDIT_RULES"
@@ -193,7 +212,7 @@ setup_audit() {
     # shellcheck disable=SC2086
     auditctl $l >/dev/null 2>&1
   done < <(audit_rule_lines)
-  auditctl -l 2>/dev/null | grep -q "key=$AUDIT_KEY" \
+  auditctl -l 2>/dev/null | grep -q -E "key=($AUDIT_KEY|$AAPANEL_KEY)" \
     || { echo "  (web-shell detection skipped: the kernel refused the audit rule)"; remove_audit; return 1; }
   return 0
 }
@@ -201,6 +220,7 @@ setup_audit() {
 # A web server on this machine? Only then is web-shell logging worth its cost.
 web_server_here() {
   local b
+  aapanel_here && { echo "aaPanel"; return 0; }   # its Nginx/Apache/PHP live under /www/server
   for b in apache2 httpd nginx lighttpd; do
     command -v "$b" >/dev/null 2>&1 && { echo "$b"; return 0; }
     [ -x "/usr/sbin/$b" ] && { echo "$b"; return 0; }
@@ -268,8 +288,23 @@ setup_detection() {
     log_lines='  <localfile>
     <log_format>audit</log_format>
     <location>/var/log/audit/audit.log</location>
-    <restrict type="PCRE2">key="'"$AUDIT_KEY"'"</restrict>
+    <restrict type="PCRE2">key="(?:'"$AUDIT_KEY|$AAPANEL_KEY"')"</restrict>
   </localfile>'
+  fi
+  # aaPanel: its sites log to /www/wwwlogs/<site>.log (Nginx "combined" - Wazuh's own web decoder reads it) and its
+  # panel logs every request to a file named by the day. Neither is read by a default agent. No auditd needed.
+  local web_logs=""
+  if aapanel_here; then
+    web_logs='  <localfile>
+    <log_format>syslog</log_format>
+    <location>/www/wwwlogs/*.log</location>
+  </localfile>
+  <localfile>
+    <log_format>syslog</log_format>
+    <location>/www/server/panel/logs/request/%Y-%m-%d.json</location>
+  </localfile>'
+    log_lines="${log_lines:+$log_lines
+}$web_logs"
   fi
   cp -p "$CONF" "$CONF.bak-detect"
   sed -i "/$DBEGIN/,/$DEND/d" "$CONF"
@@ -292,7 +327,9 @@ setup_detection() {
   [ "$who_ok" = 1 ] && ok "auditd running - File integrity records who changed a file (user + program); new watched folders need no restart"
   [ -n "$ssh_line" ] && ok "SSH keys: /home/*/.ssh watched in real time"
   [ -n "$decoy_lines" ] && ok "ransomware decoys watched in real time: $(decoy_dirs | tr '\n' ' ')"
-  [ -n "$log_lines" ] && ok "web shell: commands run by the web server account (uid 33/48) are reported - nothing else"
+  [ "$audit_ok" = 1 ] && [ "$others" = 0 ] && ok "web shell: commands run by the web server account (uid 33/48) are reported - nothing else"
+  [ -n "$web_logs" ] && ok "aaPanel found: its website logs (/www/wwwlogs) and panel logins are read by the agent"
+  [ -n "$web_logs" ] && [ "$audit_ok" = 1 ] && [ -n "$(aapanel_www_uid)" ] && ok "aaPanel web shell: commands run by its account www (uid $(aapanel_www_uid)) are reported"
   if [ "$audit_ok" = 1 ] && [ "$others" != 0 ]; then
     if [ "$OWN_AUDITD" = 1 ]; then ok "web shell: commands run by the web server account (uid 33/48) are reported - nothing else is logged"
     else ok "web shell: commands run by the web server account are logged (this server's existing audit log is read as before)"; fi
@@ -334,7 +371,8 @@ if [ "$STATUS" = 1 ]; then
     if systemctl is-active --quiet auditd 2>/dev/null; then echo "  auditd: running (File integrity records who changed a file)"
     else echo "  auditd: NOT running - File integrity has no who/program (re-run this script to install it)"; fi
     if [ -f "$AUDIT_RULES" ]; then
-      echo "  web shell: on ($(auditctl -l 2>/dev/null | grep -c "key=$AUDIT_KEY") audit rules live)"
+      echo "  web shell: on ($(auditctl -l 2>/dev/null | grep -c -E "key=($AUDIT_KEY|$AAPANEL_KEY)") audit rules live)"
+      aapanel_here && echo "  aaPanel: site logs /www/wwwlogs/*.log + panel logins read$([ -n "$(aapanel_www_uid)" ] && echo ", account www (uid $(aapanel_www_uid)) watched")"
     else echo "  web shell: off"; fi
   fi
   exit 0
