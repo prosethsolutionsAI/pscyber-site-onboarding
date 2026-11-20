@@ -117,6 +117,16 @@ What the SOC then sees (free aaPanel, which has no web firewall and no syslog):
 | Password guessing on the aaPanel panel login | Whether a panel login succeeded, and what an admin did in the panel - free aaPanel keeps those only in its own database |
 | Commands run by aaPanel's `www` account (a web shell after a successful attack) | Attacks the site blocked itself without logging |
 
+**Requests to the server's bare IP address are not logged by aaPanel.** Its default site (the one that
+answers when no website name matches, which is what most internet scanners hit) has logging switched off,
+so the agent has nothing to read for those. Requests to the customer's websites by name are logged and
+watched. To cover the bare IP too, in aaPanel add this line inside `/www/server/panel/vhost/nginx/0.default.conf`
+and reload Nginx - the agent picks the new file up by itself:
+
+```
+access_log /www/wwwlogs/default.log;
+```
+
 Each site's error log is sent too, for searching. SSH password guessing on the server is covered as on
 any Linux machine.
 

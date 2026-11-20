@@ -372,8 +372,12 @@ if [ "$STATUS" = 1 ]; then
     else echo "  auditd: NOT running - File integrity has no who/program (re-run this script to install it)"; fi
     if [ -f "$AUDIT_RULES" ]; then
       echo "  web shell: on ($(auditctl -l 2>/dev/null | grep -c -E "key=($AUDIT_KEY|$AAPANEL_KEY)") audit rules live)"
-      aapanel_here && echo "  aaPanel: site logs /www/wwwlogs/*.log + panel logins read$([ -n "$(aapanel_www_uid)" ] && echo ", account www (uid $(aapanel_www_uid)) watched")"
     else echo "  web shell: off"; fi
+    # Shown whatever the web-shell state: the log reading does not depend on auditd (found on a real aaPanel, where
+    # auditd could not start and this line was missing although the logs were being read).
+    if grep -q '<location>/www/wwwlogs/\*.log</location>' "$CONF"; then
+      echo "  aaPanel: site logs /www/wwwlogs/*.log + panel logins read$([ -f "$AUDIT_RULES" ] && [ -n "$(aapanel_www_uid)" ] && echo ", account www (uid $(aapanel_www_uid)) watched")"
+    elif aapanel_here; then echo "  aaPanel: found but its logs are NOT read - re-run this script"; fi
   fi
   exit 0
 fi
