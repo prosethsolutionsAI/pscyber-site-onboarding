@@ -19,6 +19,8 @@ pscyber-collector site-agent-command
 > Do not install an agent version **newer** than 4.14.7 - the SOC managers refuse
 > agents newer than themselves.
 
+> **aaPanel server?** Same Linux line - see [aaPanel servers - step by step](#aapanel-servers---step-by-step).
+
 ## One line per machine (agent + live device health)
 
 `pscyber-collector site-agent-command` on the collector prints these with its IP and group filled in.
@@ -63,21 +65,49 @@ install line once (it re-points nothing and keeps the agent's key) - or `sudo ap
 `sudo pscyber-agent --status` shows all three. Uninstall removes our audit rules only; `auditd` stays.
 The SSH watch picks up a user's `.ssh` created later at the agent's next full scan (every 12 hours).
 
-### aaPanel servers
+### aaPanel servers - step by step
 
-Nothing different to run: use the same Linux line above, as root. The script finds aaPanel
-(`/www/server/panel`) by itself. **A server that already has the agent: run the line again** - it keeps
-the agent's key and adds the aaPanel logs and the web-shell watch.
+There is no separate aaPanel agent. It is the normal Linux agent; the script sees aaPanel on the
+server and adds what aaPanel needs by itself. Do this on the **aaPanel server** (not on the collector):
 
-The script should print:
+**1. On the site collector**, get the ready-made command (it has the collector IP and group filled in):
+
+```bash
+pscyber-collector site-agent-command
+```
+
+Copy the **Linux** line it prints. It looks like this (with your own IP and group):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/prosethsolutionsAI/pscyber-site-onboarding/main/agents/install-agent-linux.sh | sudo bash -s -- --collector 192.168.10.50 --group Acme
+```
+
+**2. Log in to the aaPanel server over SSH** as root, or as a user that can `sudo`. (aaPanel's own
+web Terminal works too.)
+
+**3. Paste the line and press Enter.** Type the enrolment password when it asks (also printed by
+step 1). The same line works whether the server has no agent yet or already has one - with one already
+there it keeps the agent and only adds the aaPanel part.
+
+**4. Check the end of the output.** These two lines mean aaPanel is covered:
 
 ```
 ok  aaPanel found: its website logs (/www/wwwlogs) and panel logins are read by the agent
 ok  aaPanel web shell: commands run by its account www (uid ...) are reported
 ```
 
-`sudo pscyber-agent --status` shows an aaPanel line afterwards. If the first line is missing, aaPanel is
-not installed in its default place (`/www`) - send the script's output to Proseth.
+**5. Confirm it is connected:**
+
+```bash
+sudo pscyber-agent --status
+```
+
+It should say **ON**, show the collector address, and have an **aaPanel** line. Then tell Proseth the
+server's name.
+
+If the "aaPanel found" line does not appear, aaPanel is not in its default place (`/www`) - send the
+whole output of step 3 to Proseth. The server must reach the collector on TCP 1514 and 1515
+([FIREWALL.md](../FIREWALL.md)).
 
 What the SOC then sees (free aaPanel, which has no web firewall and no syslog):
 
